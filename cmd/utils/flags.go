@@ -956,6 +956,10 @@ Please note that --` + MetricsHTTPFlag.Name + ` must be set to start the server.
 		Value:    metrics.DefaultConfig.InfluxDBOrganization,
 		Category: flags.MetricsCategory,
 	}
+	SimulateModeFlag = &cli.BoolFlag{
+		Name:  "simulate-mode",
+		Usage: "Intercept eth_sendTransaction and simulate it locally, with local mining, instead of broadcasting to the network",
+	}
 )
 
 var (

@@ -100,6 +100,10 @@ type Ethereum struct {
 	lock sync.RWMutex // Protects the variadic fields (e.g. gas price and etherbase)
 
 	shutdownTracker *shutdowncheck.ShutdownTracker // Tracks if and when the node has shutdown ungracefully
+
+	// simulate mode
+	isSimulateMode bool
+	simulatedChain *ethapi.SimulatedChainStore
 }
 
 // New creates a new Ethereum object (including the initialisation of the common Ethereum object),
@@ -544,4 +548,14 @@ func (s *Ethereum) SyncMode() ethconfig.SyncMode {
 	}
 	// Nope, we're really full syncing
 	return ethconfig.FullSync
+}
+
+func (s *Ethereum) EnableSimulateMode() {
+	s.simulateMode = true
+}
+func (s *Ethereum) DisableSimulateMode() {
+	s.simulateMode = false
+}
+func (s *Ethereum) IsSimulateMode() bool {
+	return s.simulateMode
 }

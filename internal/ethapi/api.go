@@ -511,7 +511,18 @@ func (api *BlockChainAPI) GetBlockByNumber(ctx context.Context, number rpc.Block
 // GetBlockByHash returns the requested block. When fullTx is true all transactions in the block are returned in full
 // detail, otherwise only the transaction hash is returned.
 func (api *BlockChainAPI) GetBlockByHash(ctx context.Context, hash common.Hash, fullTx bool) (map[string]interface{}, error) {
+	// Simulated mode check
+	if simB, ok := api.b.(interface {
+		SimChainStore() *SimulatedChainStore
+		isSimulateMode() bool
+	}); ok && simB.isSimulateMode() {
+		if block, ok := simB.SimChainStore().GetBlockByHash(hash); ok {
+			return RPCMarshalBlock(block, true, fullTx, api.b.ChainConfig()), nil
+		}
+	}
+	// regular logic
 	block, err := api.b.BlockByHash(ctx, hash)
+	// regulare logic
 	if block != nil {
 		return RPCMarshalBlock(block, true, fullTx, api.b.ChainConfig()), nil
 	}
@@ -1330,14 +1341,29 @@ func (api *TransactionAPI) GetRawTransactionByHash(ctx context.Context, hash com
 	return tx.MarshalBinary()
 }
 
-// GetTransactionReceipt returns the transaction receipt for the given transaction hash.
 func (api *TransactionAPI) GetTransactionReceipt(ctx context.Context, hash common.Hash) (map[string]interface{}, error) {
+	//  Check simulated store first if simulate-mode is on
+	if simB, ok := api.b.(interface {
+		SimChainStore() *SimulatedChainStore
+		isSimulateMode() bool
+	}); ok && simB.isSimulateMode() {
+		if receipt, ok := simB.SimChainStore().GetReceipt(hash); ok {
+			if block, ok := simB.SimChainStore().GetBlockByHash(hash); ok {
+				if tx, ok := simB.SimChainStore().GetTransaction(hash); ok {
+					signer := types.LatestSignerForChainID(tx.ChainId()) // Simplified
+					return marshalReceipt(receipt, block.Hash(), block.NumberU64(), signer, tx, 0), nil
+				}
+			}
+		}
+	}
+
+	// ⛓️ Fallback to real chain
 	found, tx, blockHash, blockNumber, index, err := api.b.GetTransaction(ctx, hash)
 	if err != nil {
-		return nil, NewTxIndexingError() // transaction is not fully indexed
+		return nil, NewTxIndexingError()
 	}
 	if !found {
-		return nil, nil // transaction is not existent or reachable
+		return nil, nil
 	}
 	header, err := api.b.HeaderByHash(ctx, blockHash)
 	if err != nil {
@@ -1351,8 +1377,6 @@ func (api *TransactionAPI) GetTransactionReceipt(ctx context.Context, hash commo
 		return nil, nil
 	}
 	receipt := receipts[index]
-
-	// Derive the sender.
 	signer := types.MakeSigner(api.b.ChainConfig(), header.Number, header.Time)
 	return marshalReceipt(receipt, blockHash, blockNumber, signer, tx, int(index)), nil
 }
@@ -1500,10 +1524,24 @@ func (api *TransactionAPI) FillTransaction(ctx context.Context, args Transaction
 // SendRawTransaction will add the signed transaction to the transaction pool.
 // The sender is responsible for signing the transaction and using the correct nonce.
 func (api *TransactionAPI) SendRawTransaction(ctx context.Context, input hexutil.Bytes) (common.Hash, error) {
+	// normal geth logic
 	tx := new(types.Transaction)
 	if err := tx.UnmarshalBinary(input); err != nil {
 		return common.Hash{}, err
 	}
+
+	// Simulated mode logic
+	if simB, ok := api.b.(interface {
+		IsSimulateMode() bool
+		SimChainStore() *SimulatedChainStore
+	}); ok && simB.IsSimulateMode() {
+		// ⚙️ Simulate transaction logic here
+		if err := simulateAndStore(ctx, api.b, tx); err != nil {
+			return common.Hash{}, err
+		}
+		return tx.Hash(), nil
+	}
+	// normal geth logic
 	return SubmitTransaction(ctx, api.b, tx)
 }
 
@@ -1829,4 +1867,110 @@ func checkTxFee(gasPrice *big.Int, gas uint64, cap float64) error {
 		return fmt.Errorf("tx fee (%.2f ether) exceeds the configured cap (%.2f ether)", feeFloat, cap)
 	}
 	return nil
+}
+
+func simulateAndStore(ctx context.Context, backend Backend, tx *types.Transaction) error {
+	// Get chain context (chain config, block info)
+	head := backend.CurrentBlock()
+	signer := types.MakeSigner(backend.ChainConfig(), head.Number, head.Time)
+
+	// Recover sender address
+	from, err := types.Sender(signer, tx)
+	if err != nil {
+		return fmt.Errorf("failed to recover sender: %w", err)
+	}
+
+	// Convert tx to TransactionArgs and inject sender
+	args := TransactionArgsFromTransaction(tx)
+	args.From = &from
+
+	// Wrap into a simBlock
+	simBlockInstance := simBlock{
+		BlockOverrides: &override.BlockOverrides{},
+		StateOverrides: &override.StateOverride{},
+		Calls:          []TransactionArgs{args},
+	}
+
+	// Simulation options
+	opts := simOpts{
+		BlockStateCalls:        []simBlock{simBlockInstance},
+		TraceTransfers:         false,
+		Validation:             true,
+		ReturnFullTransactions: true,
+	}
+
+	// Call simulate
+	simulateAPI := &BlockChainAPI{b: backend}
+	results, err := simulateAPI.SimulateV1(ctx, opts, nil)
+	if err != nil {
+		return fmt.Errorf("simulation failed: %w", err)
+	}
+
+	if len(results) == 0 {
+		return errors.New("simulation returned no results")
+	}
+
+	// Store in simulated chain if available
+	if simB, ok := backend.(interface {
+		AddSimulatedBlock(simBlockResult *simBlockResult)
+	}); ok {
+		simB.AddSimulatedBlock(results[0])
+	}
+
+	return nil
+}
+func TransactionArgsFromTransaction(tx *types.Transaction) TransactionArgs {
+	nonce := hexutil.Uint64(tx.Nonce())
+	gas := hexutil.Uint64(tx.Gas())
+
+	data := hexutil.Bytes(tx.Data())
+	args := TransactionArgs{
+		To:         tx.To(), // nil means contract creation
+		Gas:        &gas,
+		Value:      (*hexutil.Big)(tx.Value()),
+		Nonce:      &nonce,
+		ChainID:    (*hexutil.Big)(tx.ChainId()),
+		Input:      &data, // for backwards compat
+		BlobHashes: tx.BlobHashes(),
+	}
+
+	switch tx.Type() {
+	case types.LegacyTxType:
+		args.GasPrice = (*hexutil.Big)(tx.GasPrice())
+
+	case types.AccessListTxType:
+		accessList := tx.AccessList()
+		args.AccessList = &accessList
+		args.GasPrice = (*hexutil.Big)(tx.GasPrice())
+
+	case types.DynamicFeeTxType:
+		accessList := tx.AccessList()
+		args.AccessList = &accessList
+		args.MaxFeePerGas = (*hexutil.Big)(tx.GasFeeCap())
+		args.MaxPriorityFeePerGas = (*hexutil.Big)(tx.GasTipCap())
+
+	case types.BlobTxType:
+		accessList := tx.AccessList()
+		args.AccessList = &accessList
+		args.MaxFeePerGas = (*hexutil.Big)(tx.GasFeeCap())
+		args.MaxPriorityFeePerGas = (*hexutil.Big)(tx.GasTipCap())
+		args.BlobFeeCap = (*hexutil.Big)(tx.BlobGasFeeCap())
+
+	case types.SetCodeTxType:
+		accessList := tx.AccessList()
+		args.AccessList = &accessList
+		args.MaxFeePerGas = (*hexutil.Big)(tx.GasFeeCap())
+		args.MaxPriorityFeePerGas = (*hexutil.Big)(tx.GasTipCap())
+		args.AuthorizationList = tx.SetCodeAuthorizations()
+	}
+
+	// Recover sender address using the backend
+	signer := types.LatestSignerForChainID(tx.ChainId())
+	from, err := types.Sender(signer, tx)
+	if err != nil {
+		return args
+	}
+	args.From = &from
+
+	return args
 }

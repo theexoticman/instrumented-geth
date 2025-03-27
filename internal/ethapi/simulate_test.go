@@ -33,50 +33,50 @@ func TestSimulateSanitizeBlockOrder(t *testing.T) {
 	for i, tc := range []struct {
 		baseNumber    int
 		baseTimestamp uint64
-		blocks        []simBlock
+		blocks        []SimBlock
 		expected      []result
 		err           string
 	}{
 		{
 			baseNumber:    10,
 			baseTimestamp: 50,
-			blocks:        []simBlock{{}, {}, {}},
+			blocks:        []SimBlock{{}, {}, {}},
 			expected:      []result{{number: 11, timestamp: 62}, {number: 12, timestamp: 74}, {number: 13, timestamp: 86}},
 		},
 		{
 			baseNumber:    10,
 			baseTimestamp: 50,
-			blocks:        []simBlock{{BlockOverrides: &override.BlockOverrides{Number: newInt(13), Time: newUint64(80)}}, {}},
+			blocks:        []SimBlock{{BlockOverrides: &override.BlockOverrides{Number: newInt(13), Time: newUint64(80)}}, {}},
 			expected:      []result{{number: 11, timestamp: 62}, {number: 12, timestamp: 74}, {number: 13, timestamp: 80}, {number: 14, timestamp: 92}},
 		},
 		{
 			baseNumber:    10,
 			baseTimestamp: 50,
-			blocks:        []simBlock{{BlockOverrides: &override.BlockOverrides{Number: newInt(11)}}, {BlockOverrides: &override.BlockOverrides{Number: newInt(14)}}, {}},
+			blocks:        []SimBlock{{BlockOverrides: &override.BlockOverrides{Number: newInt(11)}}, {BlockOverrides: &override.BlockOverrides{Number: newInt(14)}}, {}},
 			expected:      []result{{number: 11, timestamp: 62}, {number: 12, timestamp: 74}, {number: 13, timestamp: 86}, {number: 14, timestamp: 98}, {number: 15, timestamp: 110}},
 		},
 		{
 			baseNumber:    10,
 			baseTimestamp: 50,
-			blocks:        []simBlock{{BlockOverrides: &override.BlockOverrides{Number: newInt(13)}}, {BlockOverrides: &override.BlockOverrides{Number: newInt(12)}}},
+			blocks:        []SimBlock{{BlockOverrides: &override.BlockOverrides{Number: newInt(13)}}, {BlockOverrides: &override.BlockOverrides{Number: newInt(12)}}},
 			err:           "block numbers must be in order: 12 <= 13",
 		},
 		{
 			baseNumber:    10,
 			baseTimestamp: 50,
-			blocks:        []simBlock{{BlockOverrides: &override.BlockOverrides{Number: newInt(13), Time: newUint64(74)}}},
+			blocks:        []SimBlock{{BlockOverrides: &override.BlockOverrides{Number: newInt(13), Time: newUint64(74)}}},
 			err:           "block timestamps must be in order: 74 <= 74",
 		},
 		{
 			baseNumber:    10,
 			baseTimestamp: 50,
-			blocks:        []simBlock{{BlockOverrides: &override.BlockOverrides{Number: newInt(11), Time: newUint64(60)}}, {BlockOverrides: &override.BlockOverrides{Number: newInt(12), Time: newUint64(55)}}},
+			blocks:        []SimBlock{{BlockOverrides: &override.BlockOverrides{Number: newInt(11), Time: newUint64(60)}}, {BlockOverrides: &override.BlockOverrides{Number: newInt(12), Time: newUint64(55)}}},
 			err:           "block timestamps must be in order: 55 <= 60",
 		},
 		{
 			baseNumber:    10,
 			baseTimestamp: 50,
-			blocks:        []simBlock{{BlockOverrides: &override.BlockOverrides{Number: newInt(11), Time: newUint64(60)}}, {BlockOverrides: &override.BlockOverrides{Number: newInt(13), Time: newUint64(72)}}},
+			blocks:        []SimBlock{{BlockOverrides: &override.BlockOverrides{Number: newInt(11), Time: newUint64(60)}}, {BlockOverrides: &override.BlockOverrides{Number: newInt(13), Time: newUint64(72)}}},
 			err:           "block timestamps must be in order: 72 <= 72",
 		},
 	} {

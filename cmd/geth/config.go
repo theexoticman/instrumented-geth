@@ -36,6 +36,7 @@ import (
 	"github.com/ethereum/go-ethereum/cmd/utils"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/eth"
 	"github.com/ethereum/go-ethereum/eth/catalyst"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/internal/flags"
@@ -181,7 +182,7 @@ func makeConfigNode(ctx *cli.Context) (*node.Node, gethConfig) {
 }
 
 // makeFullNode loads geth configuration and creates the Ethereum backend.
-func makeFullNode(ctx *cli.Context) *node.Node {
+func makeFullNode(ctx *cli.Context, simulateMode bool) (*node.Node, *eth.Ethereum) {
 	stack, cfg := makeConfigNode(ctx)
 	if ctx.IsSet(utils.OverridePrague.Name) {
 		v := ctx.Uint64(utils.OverridePrague.Name)
@@ -196,6 +197,10 @@ func makeFullNode(ctx *cli.Context) *node.Node {
 	utils.SetupMetrics(&cfg.Metrics)
 
 	backend, eth := utils.RegisterEthService(stack, &cfg.Eth)
+
+	if simulateMode {
+		eth.EnableSimulateMode()
+	}
 
 	// Create gauge with geth system and build information
 	if eth != nil { // The 'eth' backend may be nil in light mode
@@ -253,7 +258,7 @@ func makeFullNode(ctx *cli.Context) *node.Node {
 			utils.Fatalf("failed to register catalyst service: %v", err)
 		}
 	}
-	return stack
+	return stack, eth
 }
 
 // dumpConfig is the dumpconfig command.

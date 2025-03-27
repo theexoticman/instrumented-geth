@@ -158,6 +158,7 @@ var (
 		utils.BeaconGenesisRootFlag,
 		utils.BeaconGenesisTimeFlag,
 		utils.BeaconCheckpointFlag,
+		utils.SimulateModeFlag,
 	}, utils.NetworkFlags, utils.DatabaseFlags)
 
 	rpcFlags = []cli.Flag{
@@ -344,7 +345,9 @@ func geth(ctx *cli.Context) error {
 	}
 
 	prepare(ctx)
-	stack := makeFullNode(ctx)
+	simulateMode := ctx.Bool("simulate-mode")
+
+	stack, be := makeFullNode(ctx, simulateMode)
 	defer stack.Close()
 
 	startNode(ctx, stack, false)

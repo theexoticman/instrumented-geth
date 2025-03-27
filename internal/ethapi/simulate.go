@@ -510,3 +510,65 @@ func (b *simBackend) HeaderByNumber(ctx context.Context, number rpc.BlockNumber)
 func (b *simBackend) ChainConfig() *params.ChainConfig {
 	return b.b.ChainConfig()
 }
+
+/**
+*
+* Used only in the simulate mode with local mining.
+*
+*
+ */
+func (call simCallResult) ToReceipt(tx *types.Transaction, blockHash common.Hash, blockNumber uint64) *types.Receipt {
+	return &types.Receipt{
+		Type:              tx.Type(),
+		CumulativeGasUsed: uint64(call.GasUsed),
+		Logs:              call.Logs,
+		TxHash:            tx.Hash(),
+		ContractAddress:   common.Address{}, // or actual if contract creation
+		GasUsed:           uint64(call.GasUsed),
+		BlockHash:         blockHash,
+		BlockNumber:       big.NewInt(int64(blockNumber)),
+		Status:            uint64(call.Status),
+	}
+}
+
+func RunSimulation(ctx context.Context, backend Backend, tx *types.Transaction) (*types.Block, *types.Receipt, error) {
+	args := TransactionArgsFromTransaction(tx)
+
+	opts := simOpts{
+		BlockStateCalls: []simBlock{
+			{
+				BlockOverrides: &override.BlockOverrides{},
+				StateOverrides: &override.StateOverride{},
+				Calls:          []TransactionArgs{args},
+			},
+		},
+		Validation:             true,
+		ReturnFullTransactions: true,
+	}
+
+	state, baseHeader, err := backend.StateAndHeaderByNumberOrHash(ctx, rpc.LatestBlockNumberOrHash)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	sim := &simulator{
+		b:           backend,
+		state:       state,
+		base:        baseHeader,
+		chainConfig: backend.ChainConfig(),
+		gp:          new(core.GasPool).AddGas(10_000_000),
+		validate:    true,
+		fullTx:      true,
+	}
+
+	results, err := sim.execute(ctx, opts.BlockStateCalls)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	simBlock := results[0]
+	block := simBlock.Block
+	receipt := simBlock.Calls[0].ToReceipt(tx, block.Hash(), block.NumberU64())
+
+	return block, receipt, nil
+}

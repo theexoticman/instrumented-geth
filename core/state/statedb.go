@@ -35,6 +35,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/ethereum/go-ethereum/trie/trienode"
 	"github.com/ethereum/go-ethereum/trie/utils"
@@ -564,6 +565,9 @@ func (s *StateDB) deleteStateObject(addr common.Address) {
 	if err := s.trie.DeleteAccount(addr); err != nil {
 		s.setError(fmt.Errorf("deleteStateObject (%x) error: %v", addr[:], err))
 	}
+}
+func (s *StateDB) GetStateObject(addr common.Address) *stateObject {
+	return s.getStateObject(addr)
 }
 
 // getStateObject retrieves a state object given by the address, returning nil if
@@ -1434,4 +1438,56 @@ func (s *StateDB) Witness() *stateless.Witness {
 
 func (s *StateDB) AccessEvents() *AccessEvents {
 	return s.accessEvents
+}
+
+func (s *StateDB) Mutations() map[common.Address]*mutation {
+	return s.mutations
+}
+
+func (s *StateDB) ForEachStorage(addr common.Address, cb func(key, value common.Hash) bool) error {
+	so := s.getStateObject(addr)
+	if so == nil {
+		return nil
+	}
+	tr, err := so.getTrie()
+	if err != nil {
+		return err
+	}
+	trieIt, err := tr.NodeIterator(nil)
+	if err != nil {
+		return err
+	}
+	it := trie.NewIterator(trieIt)
+	visited := make(map[common.Hash]bool)
+
+	for it.Next() {
+		key := common.BytesToHash(s.trie.GetKey(it.Key))
+		visited[key] = true
+
+		// Prioritize dirty storage
+		if value, dirty := so.dirtyStorage[key]; dirty {
+			if !cb(key, value) {
+				return nil
+			}
+			continue
+		}
+		if len(it.Value) > 0 {
+			_, content, _, err := rlp.Split(it.Value)
+			if err != nil {
+				return err
+			}
+			if !cb(key, common.BytesToHash(content)) {
+				return nil
+			}
+		}
+	}
+	// Also include remaining dirty storage entries not in trie
+	for key, value := range so.dirtyStorage {
+		if !visited[key] {
+			if !cb(key, value) {
+				break
+			}
+		}
+	}
+	return nil
 }
