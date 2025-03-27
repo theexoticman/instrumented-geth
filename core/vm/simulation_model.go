@@ -97,7 +97,7 @@ func NewCreate2DeployedEvent(creator, newContract, salt, bytecodeHash string) Ev
 func getExample() {
 	// Example events based on your specifications.
 	ethTransferEvent := NewEthTransferEvent("0xUser", "0xReceiver", "1000000000000000000")
-	delegateCallEvent := NewDelegateCallEvent("0xCallerContract", "0xTargetContract", "0xa9059cbb", "0xdeadbeef", []Event{})
+	delegateCallEvent := NewDelegateCallEvent("0xCallerContract", "0xTargetContract", "0xa9059cbb", "0xdeadbeef")
 	fallbackEvent := NewFallbackTriggeredEvent("0xUnknown", "0xContract", "1000000000000000", "0xdeadbeef", "0xa9059cbb")
 	selfDestructEvent := NewContractSelfDestructedEvent("0xContract", "0xReceiver")
 	create2Event := NewCreate2DeployedEvent("0xDeployer", "0xDeployedContract", "0x1234...", "0xhash...")

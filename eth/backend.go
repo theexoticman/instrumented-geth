@@ -551,11 +551,11 @@ func (s *Ethereum) SyncMode() ethconfig.SyncMode {
 }
 
 func (s *Ethereum) EnableSimulateMode() {
-	s.simulateMode = true
+	s.isSimulateMode = true
 }
 func (s *Ethereum) DisableSimulateMode() {
-	s.simulateMode = false
+	s.isSimulateMode = false
 }
 func (s *Ethereum) IsSimulateMode() bool {
-	return s.simulateMode
+	return s.isSimulateMode
 }

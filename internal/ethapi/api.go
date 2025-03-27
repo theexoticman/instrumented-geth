@@ -816,7 +816,17 @@ func (api *BlockChainAPI) SimulateV1(ctx context.Context, opts simOpts, blockNrO
 		validate:       opts.Validation,
 		fullTx:         opts.ReturnFullTransactions,
 	}
-	return sim.execute(ctx, opts.BlockStateCalls)
+	results, err := sim.execute(ctx, opts.BlockStateCalls)
+	// ⬇️ If backend supports simulated chain store, store modified account state
+	if simStore, ok := api.b.(interface {
+		SimChainStore() *SimulatedChainStore
+	}); ok {
+		accounts := ExtractSimulatedAccountState(sim.state)
+		for _, account := range accounts {
+			simStore.SimChainStore().AddSimulatedAccount(account)
+		}
+	}
+	return results, err
 }
 
 // DoEstimateGas returns the lowest possible gas limit that allows the transaction to run

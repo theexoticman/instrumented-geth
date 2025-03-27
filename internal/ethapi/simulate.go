@@ -531,44 +531,44 @@ func (call simCallResult) ToReceipt(tx *types.Transaction, blockHash common.Hash
 	}
 }
 
-func RunSimulation(ctx context.Context, backend Backend, tx *types.Transaction) (*types.Block, *types.Receipt, error) {
-	args := TransactionArgsFromTransaction(tx)
+// func RunSimulation(ctx context.Context, backend Backend, tx *types.Transaction) (*types.Block, *types.Receipt, error) {
+// 	args := TransactionArgsFromTransaction(tx)
 
-	opts := simOpts{
-		BlockStateCalls: []simBlock{
-			{
-				BlockOverrides: &override.BlockOverrides{},
-				StateOverrides: &override.StateOverride{},
-				Calls:          []TransactionArgs{args},
-			},
-		},
-		Validation:             true,
-		ReturnFullTransactions: true,
-	}
+// 	opts := simOpts{
+// 		BlockStateCalls: []simBlock{
+// 			{
+// 				BlockOverrides: &override.BlockOverrides{},
+// 				StateOverrides: &override.StateOverride{},
+// 				Calls:          []TransactionArgs{args},
+// 			},
+// 		},
+// 		Validation:             true,
+// 		ReturnFullTransactions: true,
+// 	}
 
-	state, baseHeader, err := backend.StateAndHeaderByNumberOrHash(ctx, rpc.LatestBlockNumberOrHash)
-	if err != nil {
-		return nil, nil, err
-	}
+// 	state, baseHeader, err := backend.StateAndHeaderByNumberOrHash(ctx, rpc.LatestBlockNumberOrHash)
+// 	if err != nil {
+// 		return nil, nil, err
+// 	}
 
-	sim := &simulator{
-		b:           backend,
-		state:       state,
-		base:        baseHeader,
-		chainConfig: backend.ChainConfig(),
-		gp:          new(core.GasPool).AddGas(10_000_000),
-		validate:    true,
-		fullTx:      true,
-	}
+// 	sim := &simulator{
+// 		b:           backend,
+// 		state:       state,
+// 		base:        baseHeader,
+// 		chainConfig: backend.ChainConfig(),
+// 		gp:          new(core.GasPool).AddGas(10_000_000),
+// 		validate:    true,
+// 		fullTx:      true,
+// 	}
 
-	results, err := sim.execute(ctx, opts.BlockStateCalls)
-	if err != nil {
-		return nil, nil, err
-	}
+// 	results, err := sim.execute(ctx, opts.BlockStateCalls)
+// 	if err != nil {
+// 		return nil, nil, err
+// 	}
 
-	simBlock := results[0]
-	block := simBlock.Block
-	receipt := simBlock.Calls[0].ToReceipt(tx, block.Hash(), block.NumberU64())
+// 	simBlock := results[0]
+// 	block := simBlock.Block
+// 	receipt := simBlock.Calls[0].ToReceipt(tx, block.Hash(), block.NumberU64())
 
-	return block, receipt, nil
-}
+// 	return block, receipt, nil
+// }

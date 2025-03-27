@@ -1491,3 +1491,11 @@ func (s *StateDB) ForEachStorage(addr common.Address, cb func(key, value common.
 	}
 	return nil
 }
+
+func (s *StateDB) Dirties() map[common.Address]struct{} {
+	dirties := make(map[common.Address]struct{})
+	for addr := range s.journal.dirties {
+		dirties[addr] = struct{}{}
+	}
+	return dirties
+}

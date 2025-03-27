@@ -1,12 +1,12 @@
 package ethapi
 
 import (
-	"math/big"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/holiman/uint256"
 )
 
 // SimulatedChainStore stores simulated blocks, receipts and txs for local-only chain state.
@@ -14,18 +14,18 @@ type SimulatedChainStore struct {
 	txMu          sync.RWMutex
 	blocksMu      sync.RWMutex
 	receiptsMu    sync.RWMutex
+	accountsMu    sync.RWMutex
 	blocks        []*types.Block                     // Ordered simulated blocks
 	blockMap      map[common.Hash]*types.Block       // block hash -> block
 	txs           map[common.Hash]*types.Transaction // tx hash -> tx
 	receipts      map[common.Hash]*types.Receipt     // tx hash -> receipt
 	blockTxs      map[uint64][]common.Hash           // block number -> list of tx hashes
-	accountsState map[common.Address]AccountState
+	accountsState map[common.Address]*SimulatedAccount
 }
 
-type AccountState struct {
-	Balance *big.Int
-	Nonce   uint64
-	Code    []byte
+type SimulatedAccount struct {
+	Address common.Address
+	Balance *uint256.Int
 	Storage map[common.Hash]common.Hash
 }
 
@@ -141,22 +141,21 @@ func (s *SimulatedChainStore) AddSimulatedResult(result *simBlockResult) {
 	}
 }
 
-func ExtractTouchedAccountStates(_state *state.StateDB) map[common.Address]*AccountState {
-	touched := make(map[common.Address]*AccountState)
+func ExtractSimulatedAccountState(_state *state.StateDB) map[common.Address]*SimulatedAccount {
+	touched := make(map[common.Address]*SimulatedAccount)
 
 	for addr := range _state.Mutations() {
 		obj := _state.GetStateObject(addr)
 		if obj == nil {
 			continue // account was deleted
 		}
-		account := &AccountState{
-			Balance: obj.Balance().ToBig(),
-			Nonce:   obj.Nonce(),
-			Code:    obj.Code(),
+		account := &SimulatedAccount{
+			Address: obj.Address(),
+			Balance: obj.Balance(),
 			Storage: make(map[common.Hash]common.Hash),
 		}
 
-		obj.ForEachStorage(func(key, value common.Hash) bool {
+		_state.ForEachStorage(obj.Address(), func(key, value common.Hash) bool {
 			account.Storage[key] = value
 			return true
 		})
@@ -165,4 +164,31 @@ func ExtractTouchedAccountStates(_state *state.StateDB) map[common.Address]*Acco
 	}
 
 	return touched
+}
+
+// AddAccount inserts or updates the state of an account in the simulated store.
+func (s *SimulatedChainStore) AddSimulatedAccount(account *SimulatedAccount) {
+	s.accountsMu.Lock()
+	defer s.accountsMu.Unlock()
+
+	if s.accountsState == nil {
+		s.accountsState = make(map[common.Address]*SimulatedAccount)
+	}
+
+	existing, ok := s.accountsState[account.Address]
+	if !ok {
+		// First time seeing this account
+		s.accountsState[account.Address] = account
+		return
+	}
+
+	// Optionally merge the state (or just replace)
+	existing.Balance = account.Balance
+
+	if existing.Storage == nil {
+		existing.Storage = make(map[common.Hash]common.Hash)
+	}
+	for k, v := range account.Storage {
+		existing.Storage[k] = v
+	}
 }

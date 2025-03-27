@@ -345,9 +345,9 @@ func geth(ctx *cli.Context) error {
 	}
 
 	prepare(ctx)
-	simulateMode := ctx.Bool("simulate-mode")
+	SimulateMode := ctx.Bool("simulate-mode")
 
-	stack, be := makeFullNode(ctx, simulateMode)
+	stack, _ := makeFullNode(ctx, SimulateMode)
 	defer stack.Close()
 
 	startNode(ctx, stack, false)

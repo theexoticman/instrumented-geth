@@ -1286,7 +1286,7 @@ func TestSimulateV1(t *testing.T) {
 	}
 	var testSuite = []struct {
 		name             string
-		blocks           []SimBlock
+		blocks           []simBlock
 		tag              rpc.BlockNumberOrHash
 		includeTransfers *bool
 		validation       *bool
@@ -1299,7 +1299,7 @@ func TestSimulateV1(t *testing.T) {
 		{
 			name: "simple",
 			tag:  latest,
-			blocks: []SimBlock{{
+			blocks: []simBlock{{
 				StateOverrides: &override.StateOverride{
 					randomAccounts[0].addr: override.OverrideAccount{Balance: newRPCBalance(big.NewInt(1000))},
 				},
@@ -1342,7 +1342,7 @@ func TestSimulateV1(t *testing.T) {
 			// State build-up over blocks.
 			name: "simple-multi-block",
 			tag:  latest,
-			blocks: []SimBlock{{
+			blocks: []simBlock{{
 				StateOverrides: &override.StateOverride{
 					randomAccounts[0].addr: override.OverrideAccount{Balance: newRPCBalance(big.NewInt(2000))},
 				},
@@ -1403,7 +1403,7 @@ func TestSimulateV1(t *testing.T) {
 			// insufficient funds
 			name: "insufficient-funds",
 			tag:  latest,
-			blocks: []SimBlock{{
+			blocks: []simBlock{{
 				Calls: []TransactionArgs{{
 					From:  &randomAccounts[0].addr,
 					To:    &randomAccounts[1].addr,
@@ -1416,7 +1416,7 @@ func TestSimulateV1(t *testing.T) {
 			// EVM error
 			name: "evm-error",
 			tag:  latest,
-			blocks: []SimBlock{{
+			blocks: []simBlock{{
 				StateOverrides: &override.StateOverride{
 					randomAccounts[2].addr: override.OverrideAccount{Code: hex2Bytes("f3")},
 				},
@@ -1443,7 +1443,7 @@ func TestSimulateV1(t *testing.T) {
 			// Block overrides should work, each call is simulated on a different block number
 			name: "block-overrides",
 			tag:  latest,
-			blocks: []SimBlock{{
+			blocks: []simBlock{{
 				BlockOverrides: &override.BlockOverrides{
 					Number:       (*hexutil.Big)(big.NewInt(11)),
 					FeeRecipient: &cac,
@@ -1501,7 +1501,7 @@ func TestSimulateV1(t *testing.T) {
 		{
 			name: "block-number-order",
 			tag:  latest,
-			blocks: []SimBlock{{
+			blocks: []simBlock{{
 				BlockOverrides: &override.BlockOverrides{
 					Number: (*hexutil.Big)(big.NewInt(12)),
 				},
@@ -1533,7 +1533,7 @@ func TestSimulateV1(t *testing.T) {
 		{
 			name: "storage-contract",
 			tag:  latest,
-			blocks: []SimBlock{{
+			blocks: []simBlock{{
 				StateOverrides: &override.StateOverride{
 					randomAccounts[2].addr: override.OverrideAccount{
 						Code: hex2Bytes("608060405234801561001057600080fd5b50600436106100365760003560e01c80632e64cec11461003b5780636057361d14610059575b600080fd5b610043610075565b60405161005091906100d9565b60405180910390f35b610073600480360381019061006e919061009d565b61007e565b005b60008054905090565b8060008190555050565b60008135905061009781610103565b92915050565b6000602082840312156100b3576100b26100fe565b5b60006100c184828501610088565b91505092915050565b6100d3816100f4565b82525050565b60006020820190506100ee60008301846100ca565b92915050565b6000819050919050565b600080fd5b61010c816100f4565b811461011757600080fd5b5056fea2646970667358221220404e37f487a89a932dca5e77faaf6ca2de3b991f93d230604b1b8daaef64766264736f6c63430008070033"),
@@ -1575,7 +1575,7 @@ func TestSimulateV1(t *testing.T) {
 		{
 			name: "logs",
 			tag:  latest,
-			blocks: []SimBlock{{
+			blocks: []simBlock{{
 				StateOverrides: &override.StateOverride{
 					randomAccounts[2].addr: override.OverrideAccount{
 						// Yul code:
@@ -1617,7 +1617,7 @@ func TestSimulateV1(t *testing.T) {
 		{
 			name: "ecrecover-override",
 			tag:  latest,
-			blocks: []SimBlock{{
+			blocks: []simBlock{{
 				StateOverrides: &override.StateOverride{
 					randomAccounts[2].addr: override.OverrideAccount{
 						// Yul code that returns ecrecover(0, 0, 0, 0).
@@ -1682,7 +1682,7 @@ func TestSimulateV1(t *testing.T) {
 		{
 			name: "precompile-move",
 			tag:  latest,
-			blocks: []SimBlock{{
+			blocks: []simBlock{{
 				StateOverrides: &override.StateOverride{
 					sha256Address: override.OverrideAccount{
 						// Yul code that returns the calldata.
@@ -1737,7 +1737,7 @@ func TestSimulateV1(t *testing.T) {
 		{
 			name: "transfer-logs",
 			tag:  latest,
-			blocks: []SimBlock{{
+			blocks: []simBlock{{
 				StateOverrides: &override.StateOverride{
 					randomAccounts[0].addr: override.OverrideAccount{
 						Balance: newRPCBalance(big.NewInt(100)),
@@ -1800,7 +1800,7 @@ func TestSimulateV1(t *testing.T) {
 		{
 			name: "selfdestruct",
 			tag:  latest,
-			blocks: []SimBlock{{
+			blocks: []simBlock{{
 				Calls: []TransactionArgs{{
 					From: &accounts[0].addr,
 					To:   &cac,
@@ -1865,7 +1865,7 @@ func TestSimulateV1(t *testing.T) {
 		{
 			name: "validation-checks",
 			tag:  latest,
-			blocks: []SimBlock{{
+			blocks: []simBlock{{
 				Calls: []TransactionArgs{{
 					From:  &accounts[2].addr,
 					To:    &cac,
@@ -1880,7 +1880,7 @@ func TestSimulateV1(t *testing.T) {
 		{
 			name: "validation-checks-from-contract",
 			tag:  latest,
-			blocks: []SimBlock{{
+			blocks: []simBlock{{
 				StateOverrides: &override.StateOverride{
 					randomAccounts[2].addr: override.OverrideAccount{
 						Balance: newRPCBalance(big.NewInt(2098640803896784)),
@@ -1915,7 +1915,7 @@ func TestSimulateV1(t *testing.T) {
 		{
 			name: "validation-checks-success",
 			tag:  latest,
-			blocks: []SimBlock{{
+			blocks: []simBlock{{
 				BlockOverrides: &override.BlockOverrides{
 					BaseFeePerGas: (*hexutil.Big)(big.NewInt(1)),
 				},
@@ -1948,7 +1948,7 @@ func TestSimulateV1(t *testing.T) {
 		{
 			name: "clear-storage",
 			tag:  latest,
-			blocks: []SimBlock{{
+			blocks: []simBlock{{
 				StateOverrides: &override.StateOverride{
 					randomAccounts[2].addr: {
 						Code: newBytes(genesis.Alloc[bab].Code),
@@ -2017,7 +2017,7 @@ func TestSimulateV1(t *testing.T) {
 		{
 			name: "blockhash-opcode",
 			tag:  latest,
-			blocks: []SimBlock{{
+			blocks: []simBlock{{
 				BlockOverrides: &override.BlockOverrides{
 					Number: (*hexutil.Big)(big.NewInt(12)),
 				},
@@ -2132,7 +2132,7 @@ func TestSimulateV1(t *testing.T) {
 		{
 			name: "basefee-non-validation",
 			tag:  latest,
-			blocks: []SimBlock{{
+			blocks: []simBlock{{
 				StateOverrides: &override.StateOverride{
 					randomAccounts[2].addr: {
 						// Yul code:
@@ -2240,7 +2240,7 @@ func TestSimulateV1(t *testing.T) {
 		}, {
 			name: "basefee-validation-mode",
 			tag:  latest,
-			blocks: []SimBlock{{
+			blocks: []simBlock{{
 				StateOverrides: &override.StateOverride{
 					randomAccounts[2].addr: {
 						// Yul code:
@@ -2392,7 +2392,7 @@ func TestSimulateV1ChainLinkage(t *testing.T) {
 			Input: uint256ToBytes(uint256.NewInt(baseHeader.Number.Uint64() + 2)),
 			Gas:   newUint64(1000000),
 		}
-		blocks = []SimBlock{
+		blocks = []simBlock{
 			{Calls: []TransactionArgs{call1}},
 			{Calls: []TransactionArgs{call2}},
 			{Calls: []TransactionArgs{call3a, call3b}},
