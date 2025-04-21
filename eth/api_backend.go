@@ -38,6 +38,7 @@ import (
 	"github.com/ethereum/go-ethereum/eth/tracers"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
+	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rpc"
 )
@@ -420,4 +421,19 @@ func (b *EthAPIBackend) StateAtBlock(ctx context.Context, block *types.Block, re
 
 func (b *EthAPIBackend) StateAtTransaction(ctx context.Context, block *types.Block, txIndex int, reexec uint64) (*types.Transaction, vm.BlockContext, *state.StateDB, tracers.StateReleaseFunc, error) {
 	return b.eth.stateAtTransaction(ctx, block, txIndex, reexec)
+}
+
+// In eth/api_backend.go
+func (b *EthAPIBackend) IsSimulateMode() bool {
+	if b.eth == nil {
+		return false
+	}
+	return b.eth.IsSimulateMode() // Calls the IsSimulateMode method on the *Ethereum instance
+}
+
+func (b *EthAPIBackend) SimChainStore() *ethapi.SimulatedChainStore {
+	if b.eth == nil {
+		return nil
+	}
+	return b.eth.SimChainStore() // Calls the SimChainStore method on the *Ethereum instance
 }

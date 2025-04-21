@@ -23,6 +23,7 @@ import (
 	"fmt"
 	gomath "math"
 	"math/big"
+	"os"
 	"strings"
 	"time"
 
@@ -516,9 +517,10 @@ func (api *BlockChainAPI) GetBlockByHash(ctx context.Context, hash common.Hash, 
 		SimChainStore() *SimulatedChainStore
 		isSimulateMode() bool
 	}); ok && simB.isSimulateMode() {
-		if block, ok := simB.SimChainStore().GetBlockByHash(hash); ok {
-			return RPCMarshalBlock(block, true, fullTx, api.b.ChainConfig()), nil
-		}
+		// NOT MANAGED BY SIMULATED CHAIN STORE
+		// use tx hash instead
+		return RPCMarshalBlock(nil, true, fullTx, api.b.ChainConfig()), nil
+
 	}
 	// regular logic
 	block, err := api.b.BlockByHash(ctx, hash)
@@ -816,17 +818,94 @@ func (api *BlockChainAPI) SimulateV1(ctx context.Context, opts simOpts, blockNrO
 		validate:       opts.Validation,
 		fullTx:         opts.ReturnFullTransactions,
 	}
+	return sim.execute(ctx, opts.BlockStateCalls)
+}
+
+// SimulateV1IPSP is a variant of SimulateV1 that returns the final state.
+// used in solo mining in combination with the simulation store
+func (api *BlockChainAPI) SimulateV1IPSP(ctx context.Context, opts simOpts, blockNrOrHash *rpc.BlockNumberOrHash, originalTx *types.Transaction) ([]*simBlockResult, error, *state.StateDB) {
+	fmt.Println(">>> SimulateV1 entered")
+	os.Stdout.Sync()
+	if len(opts.BlockStateCalls) == 0 {
+		return nil, &invalidParamsError{message: "empty input"}, nil
+	} else if len(opts.BlockStateCalls) > maxSimulateBlocks {
+		return nil, &clientLimitExceededError{message: "too many blocks"}, nil
+	}
+	if blockNrOrHash == nil {
+		n := rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber)
+		blockNrOrHash = &n
+	}
+
+	state, base, err := api.b.StateAndHeaderByNumberOrHash(ctx, *blockNrOrHash)
+	if state == nil || err != nil {
+		return nil, err, nil
+	}
+	gasCap := api.b.RPCGasCap()
+	if gasCap == 0 {
+		gasCap = gomath.MaxUint64
+	}
+
+	sim := &simulator{
+		b:              api.b,
+		state:          state,
+		base:           base,
+		chainConfig:    api.b.ChainConfig(),
+		gp:             new(core.GasPool).AddGas(gasCap),
+		traceTransfers: opts.TraceTransfers,
+		validate:       opts.Validation,
+		fullTx:         opts.ReturnFullTransactions,
+	}
+
 	results, err := sim.execute(ctx, opts.BlockStateCalls)
-	// ⬇️ If backend supports simulated chain store, store modified account state
+	if err != nil {
+		return nil, err, nil
+	}
+
+	// fmt.Printf("simulation activited %v \n", false)
+	// Store simulated artifacts if supported
 	if simStore, ok := api.b.(interface {
 		SimChainStore() *SimulatedChainStore
-	}); ok {
-		accounts := ExtractSimulatedAccountState(sim.state)
-		for _, account := range accounts {
-			simStore.SimChainStore().AddSimulatedAccount(account)
+		isSimulateMode() bool
+	}); ok && simStore.isSimulateMode() {
+		fmt.Printf("simulation activited %v \n", simStore.isSimulateMode())
+		StoreSimulatedArtifacts(simStore.SimChainStore(), results, sim.state, originalTx) // Pass nil for originalTx here
+	}
+
+	return results, nil, sim.state
+}
+
+// StoreSimulatedArtifacts stores the results of a simulation into the simStore.
+// It optionally accepts the original transaction to ensure the correct hash is used for storage.
+func StoreSimulatedArtifacts(simStore *SimulatedChainStore, results []*simBlockResult, state *state.StateDB, originalTx *types.Transaction) {
+
+	if simStore == nil {
+		return
+	}
+
+	for _, res := range results {
+
+		if res == nil {
+			continue
+		}
+		if res.Block != nil {
+			// Determine the original hash to pass down, if applicable
+			var originalHash *common.Hash
+			if originalTx != nil && len(results) == 1 && len(res.Block.Transactions()) == 1 {
+				// Heuristic: If we got a single original tx, coming from rawtransaction rpc, and this result has a single tx,
+				// assume they correspond and use the original hash.
+				h := originalTx.Hash()
+				originalHash = &h
+			}
+			// adds block, txs, and receipts, potentially using the original hash
+			simStore.AddBlock(res.Block, res.Receipts, originalHash)
+		}
+
+		for _, account := range ExtractSimulatedAccountState(state) {
+			if account != nil {
+				simStore.AddSimulatedAccount(account)
+			}
 		}
 	}
-	return results, err
 }
 
 // DoEstimateGas returns the lowest possible gas limit that allows the transaction to run
@@ -1358,11 +1437,9 @@ func (api *TransactionAPI) GetTransactionReceipt(ctx context.Context, hash commo
 		isSimulateMode() bool
 	}); ok && simB.isSimulateMode() {
 		if receipt, ok := simB.SimChainStore().GetReceipt(hash); ok {
-			if block, ok := simB.SimChainStore().GetBlockByHash(hash); ok {
-				if tx, ok := simB.SimChainStore().GetTransaction(hash); ok {
-					signer := types.LatestSignerForChainID(tx.ChainId()) // Simplified
-					return marshalReceipt(receipt, block.Hash(), block.NumberU64(), signer, tx, 0), nil
-				}
+			if tx, ok := simB.SimChainStore().GetTransaction(hash); ok {
+				signer := types.LatestSignerForChainID(tx.ChainId()) // Simplified
+				return marshalReceipt(receipt, common.Hash{}, 0, signer, tx, 0), nil
 			}
 		}
 	}
@@ -1544,12 +1621,14 @@ func (api *TransactionAPI) SendRawTransaction(ctx context.Context, input hexutil
 	if simB, ok := api.b.(interface {
 		IsSimulateMode() bool
 		SimChainStore() *SimulatedChainStore
-	}); ok && simB.IsSimulateMode() {
-		// ⚙️ Simulate transaction logic here
-		if err := simulateAndStore(ctx, api.b, tx); err != nil {
-			return common.Hash{}, err
+	}); ok {
+		if simB.IsSimulateMode() {
+			// Simulate transaction logic here
+			if err := simulateAndStore(ctx, api.b, tx); err != nil {
+				return common.Hash{}, err
+			}
+			return tx.Hash(), nil
 		}
-		return tx.Hash(), nil
 	}
 	// normal geth logic
 	return SubmitTransaction(ctx, api.b, tx)
@@ -1911,20 +1990,23 @@ func simulateAndStore(ctx context.Context, backend Backend, tx *types.Transactio
 
 	// Call simulate
 	simulateAPI := &BlockChainAPI{b: backend}
-	results, err := simulateAPI.SimulateV1(ctx, opts, nil)
+	results, err, finalState := simulateAPI.SimulateV1IPSP(ctx, opts, nil, tx)
 	if err != nil {
 		return fmt.Errorf("simulation failed: %w", err)
 	}
-
-	if len(results) == 0 {
+	if len(results) == 0 { // Keep existing check
 		return errors.New("simulation returned no results")
 	}
 
-	// Store in simulated chain if available
-	if simB, ok := backend.(interface {
-		AddSimulatedBlock(simBlockResult *simBlockResult)
-	}); ok {
-		simB.AddSimulatedBlock(results[0])
+	// Store simulated artifacts if the backend supports it and is in simulate mode
+	if simStoreProvider, ok := backend.(interface {
+		SimChainStore() *SimulatedChainStore
+		IsSimulateMode() bool // Corrected: Use exported method name
+	}); ok && simStoreProvider.IsSimulateMode() { // Corrected: Call exported method
+		simStore := simStoreProvider.SimChainStore()
+		if simStore != nil {
+			StoreSimulatedArtifacts(simStore, results, finalState, tx) // Use the existing utility
+		}
 	}
 
 	return nil

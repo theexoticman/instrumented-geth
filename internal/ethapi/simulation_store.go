@@ -11,16 +11,16 @@ import (
 
 // SimulatedChainStore stores simulated blocks, receipts and txs for local-only chain state.
 type SimulatedChainStore struct {
-	txMu          sync.RWMutex
-	blocksMu      sync.RWMutex
-	receiptsMu    sync.RWMutex
-	accountsMu    sync.RWMutex
-	blocks        []*types.Block                     // Ordered simulated blocks
-	blockMap      map[common.Hash]*types.Block       // block hash -> block
-	txs           map[common.Hash]*types.Transaction // tx hash -> tx
-	receipts      map[common.Hash]*types.Receipt     // tx hash -> receipt
-	blockTxs      map[uint64][]common.Hash           // block number -> list of tx hashes
-	accountsState map[common.Address]*SimulatedAccount
+	txMu       sync.RWMutex
+	blocksMu   sync.RWMutex
+	receiptsMu sync.RWMutex
+	accountsMu sync.RWMutex
+	blocks     []*types.Block                     // Ordered simulated blocks
+	blockMap   map[common.Hash]*types.Block       // block hash -> block
+	txs        map[common.Hash]*types.Transaction // tx hash -> tx
+	receipts   map[common.Hash]*types.Receipt     // tx hash -> receipt
+	blockTxs   map[uint64][]common.Hash           // block number -> list of tx hashes
+	accounts   map[common.Address]*SimulatedAccount
 }
 
 type SimulatedAccount struct {
@@ -36,24 +36,7 @@ func NewSimulatedChainStore() *SimulatedChainStore {
 		txs:      make(map[common.Hash]*types.Transaction),
 		receipts: make(map[common.Hash]*types.Receipt),
 		blockTxs: make(map[uint64][]common.Hash),
-	}
-}
-
-// AddBlock stores a simulated block and all related txs and receipts.
-func (s *SimulatedChainStore) AddBlock(block *types.Block, receipts []*types.Receipt) {
-	s.blocksMu.Lock()
-	defer s.blocksMu.Unlock()
-
-	s.blocks = append(s.blocks, block)
-	s.blockMap[block.Hash()] = block
-
-	blockNumber := block.NumberU64()
-
-	for i, tx := range block.Transactions() {
-		txHash := tx.Hash()
-		s.txs[txHash] = tx
-		s.receipts[txHash] = receipts[i]
-		s.blockTxs[blockNumber] = append(s.blockTxs[blockNumber], txHash)
+		accounts: make(map[common.Address]*SimulatedAccount),
 	}
 }
 
@@ -86,12 +69,12 @@ func (s *SimulatedChainStore) GetBlockByNumber(num uint64) (*types.Block, bool) 
 }
 
 // GetBlockByHash returns a simulated block by hash.
-func (s *SimulatedChainStore) GetBlockByHash(hash common.Hash) (*types.Block, bool) {
-	s.blocksMu.RLock()
-	defer s.blocksMu.RUnlock()
-	block, ok := s.blockMap[hash]
-	return block, ok
-}
+// func (s *SimulatedChainStore) GetBlockByHash(hash common.Hash) (*types.Block, bool) {
+// 	s.blocksMu.RLock()
+// 	defer s.blocksMu.RUnlock()
+// 	block, ok := s.blockMap[hash]
+// 	return block, ok
+// }
 
 // GetTransactionsByBlockNumber returns all txs for a simulated block.
 func (s *SimulatedChainStore) GetTransactionsByBlockNumber(num uint64) ([]*types.Transaction, bool) {
@@ -111,36 +94,8 @@ func (s *SimulatedChainStore) GetTransactionsByBlockNumber(num uint64) ([]*types
 	return txs, true
 }
 
-func (s *SimulatedChainStore) AddSimulatedResult(result *simBlockResult) {
-	if result == nil || result.Block == nil {
-		return
-	}
-
-	s.blocksMu.Lock()
-	defer s.blocksMu.Unlock()
-
-	block := result.Block
-	s.blocks = append(s.blocks, block)
-	s.blockMap[block.Hash()] = block
-
-	// Extract transactions and map them
-	txs := block.Transactions()
-	for _, tx := range txs {
-		s.txs[tx.Hash()] = tx
-	}
-
-	// Build and store receipts from simCallResult
-	for i, call := range result.Calls {
-		// safety check in case fewer txs than calls
-		if i >= len(txs) {
-			break
-		}
-		tx := txs[i]
-		receipt := call.ToReceipt(tx, block.Hash(), block.NumberU64())
-		s.receipts[tx.Hash()] = receipt
-	}
-}
-
+// ExtractSimulatedAccountState extracts the state of all touched accounts from the given state.
+// Used to extract the state of the accounts from the final state after simulation.
 func ExtractSimulatedAccountState(_state *state.StateDB) map[common.Address]*SimulatedAccount {
 	touched := make(map[common.Address]*SimulatedAccount)
 
@@ -171,14 +126,14 @@ func (s *SimulatedChainStore) AddSimulatedAccount(account *SimulatedAccount) {
 	s.accountsMu.Lock()
 	defer s.accountsMu.Unlock()
 
-	if s.accountsState == nil {
-		s.accountsState = make(map[common.Address]*SimulatedAccount)
+	if s.accounts == nil {
+		s.accounts = make(map[common.Address]*SimulatedAccount)
 	}
 
-	existing, ok := s.accountsState[account.Address]
+	existing, ok := s.accounts[account.Address]
 	if !ok {
 		// First time seeing this account
-		s.accountsState[account.Address] = account
+		s.accounts[account.Address] = account
 		return
 	}
 
@@ -191,4 +146,51 @@ func (s *SimulatedChainStore) AddSimulatedAccount(account *SimulatedAccount) {
 	for k, v := range account.Storage {
 		existing.Storage[k] = v
 	}
+}
+
+// AddBlock stores a simulated block and all related txs and receipts.
+// It now accepts an optional originalTxHash to use as the storage key for the transaction and receipt.
+func (s *SimulatedChainStore) AddBlock(block *types.Block, receipts []*types.Receipt, originalTxHash *common.Hash) {
+	s.blocksMu.Lock()
+	defer s.blocksMu.Unlock()
+	s.txMu.Lock()
+	defer s.txMu.Unlock()
+	s.receiptsMu.Lock()
+	defer s.receiptsMu.Unlock()
+
+	s.blocks = append(s.blocks, block)
+	s.blockMap[block.Hash()] = block
+
+	blockNumber := block.NumberU64()
+	// Ensure the blockTxs slice for this number exists
+	if _, exists := s.blockTxs[blockNumber]; !exists {
+		s.blockTxs[blockNumber] = []common.Hash{}
+	}
+
+	for i, tx := range block.Transactions() {
+		// Determine the key to use for storage.
+		// Use the provided original hash if available, otherwise use the hash of the reconstructed tx.
+		var storageKey common.Hash
+		if originalTxHash != nil && i == 0 { // Assuming originalTxHash corresponds to the first (and likely only) tx in this context
+			storageKey = *originalTxHash
+		} else {
+			storageKey = tx.Hash() // Hash of reconstructed tx
+		}
+
+		s.txs[storageKey] = tx
+		s.receipts[storageKey] = receipts[i]
+		s.blockTxs[blockNumber] = append(s.blockTxs[blockNumber], storageKey)
+	}
+}
+
+// GetAccount returns the stored simulated account state for a given address.
+func (s *SimulatedChainStore) GetAccount(addr common.Address) *SimulatedAccount {
+	s.accountsMu.RLock()
+	defer s.accountsMu.RUnlock()
+
+	return s.accounts[addr]
+}
+
+func (s *SimulatedChainStore) Blocks() []*types.Block {
+	return s.blocks
 }

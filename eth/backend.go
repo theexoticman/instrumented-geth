@@ -103,7 +103,7 @@ type Ethereum struct {
 
 	// simulate mode
 	isSimulateMode bool
-	simulatedChain *ethapi.SimulatedChainStore
+	simStore       *ethapi.SimulatedChainStore
 }
 
 // New creates a new Ethereum object (including the initialisation of the common Ethereum object),
@@ -185,6 +185,11 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		p2pServer:       stack.Server(),
 		discmix:         enode.NewFairMix(0),
 		shutdownTracker: shutdowncheck.NewShutdownTracker(chainDb),
+		isSimulateMode:  config.SimulateMode,
+	}
+	// Advanced Simulate mode
+	if config.SimulateMode {
+		eth.simStore = ethapi.NewSimulatedChainStore()
 	}
 	bcVersion := rawdb.ReadDatabaseVersion(chainDb)
 	var dbVer = "<nil>"
@@ -558,4 +563,8 @@ func (s *Ethereum) DisableSimulateMode() {
 }
 func (s *Ethereum) IsSimulateMode() bool {
 	return s.isSimulateMode
+}
+
+func (e *Ethereum) SimChainStore() *ethapi.SimulatedChainStore {
+	return e.simStore
 }

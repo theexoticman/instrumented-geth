@@ -29,6 +29,7 @@ import (
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/eth/filters"
 	"github.com/ethereum/go-ethereum/ethclient"
+
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/params"
@@ -100,6 +101,64 @@ func NewBackend(alloc types.GenesisAlloc, options ...func(nodeConf *node.Config,
 		panic(err) // this should never happen
 	}
 	return sim
+}
+
+// IPSP Creation
+// NewSimulatedEthereumBackend creates a new simulated backend and returns both
+// the backend and the underlying Ethereum instance (useful for testing internals).
+// NewSimulatedEthereumBackend creates a simulated backend and exposes both the backend and the underlying Ethereum service.
+// This function is intended to support simulate-mode integration testing by ensuring the Ethereum service is fully accessible.
+func NewSimulatedEthereumBackend(
+	alloc types.GenesisAlloc,
+	options ...func(nodeConf *node.Config, ethConf *ethconfig.Config),
+) (*Backend, *eth.Ethereum, error) {
+	nodeConf := node.DefaultConfig
+	nodeConf.DataDir = "" // In-memory
+	nodeConf.P2P = p2p.Config{NoDiscovery: true}
+
+	ethConf := ethconfig.Defaults
+	ethConf.Genesis = &core.Genesis{
+		Config:   params.AllDevChainProtocolChanges,
+		GasLimit: ethconfig.Defaults.Miner.GasCeil,
+		Alloc:    alloc,
+	}
+	ethConf.SyncMode = ethconfig.FullSync
+	ethConf.TxPool.NoLocals = true
+	ethConf.SimulateMode = true
+
+	for _, opt := range options {
+		opt(&nodeConf, &ethConf)
+	}
+
+	stack, err := node.New(&nodeConf)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	ethService, err := eth.New(stack, &ethConf)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	beacon, err := catalyst.NewSimulatedBeacon(0, common.Address{}, ethService)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := beacon.Fork(ethService.BlockChain().GetCanonicalHash(0)); err != nil {
+		return nil, nil, err
+	}
+
+	if err := stack.Start(); err != nil {
+		return nil, nil, err
+	}
+
+	backend := &Backend{
+		node:   stack,
+		beacon: beacon,
+		client: simClient{ethclient.NewClient(stack.Attach())},
+	}
+
+	return backend, ethService, nil
 }
 
 // newWithNode sets up a simulated backend on an existing node. The provided node
@@ -189,4 +248,9 @@ func (n *Backend) AdjustTime(adjustment time.Duration) error {
 // Client returns a client that accesses the simulated chain.
 func (n *Backend) Client() Client {
 	return n.client
+}
+
+// Client returns a client that accesses the simulated chain.
+func (n *Backend) Node() *node.Node {
+	return n.node
 }
