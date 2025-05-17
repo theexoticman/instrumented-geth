@@ -437,3 +437,7 @@ func (b *EthAPIBackend) SimChainStore() *ethapi.SimulatedChainStore {
 	}
 	return b.eth.SimChainStore() // Calls the SimChainStore method on the *Ethereum instance
 }
+
+func (b *EthAPIBackend) GetTracerEvents() *ethapi.SimulatedChainStore {
+
+}

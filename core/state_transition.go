@@ -23,6 +23,7 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
@@ -657,4 +658,28 @@ func (st *stateTransition) gasUsed() uint64 {
 // blobGasUsed returns the amount of blob gas used by the message.
 func (st *stateTransition) blobGasUsed() uint64 {
 	return uint64(len(st.msg.BlobHashes) * params.BlobTxBlobGasPerBlob)
+}
+
+// callTrace is the result of a callTracer run.
+type CallTrace struct {
+	From         common.Address  `json:"from"`
+	Gas          *hexutil.Uint64 `json:"gas"`
+	GasUsed      *hexutil.Uint64 `json:"gasUsed"`
+	To           *common.Address `json:"to,omitempty"`
+	Input        hexutil.Bytes   `json:"input"`
+	Output       hexutil.Bytes   `json:"output,omitempty"`
+	Error        string          `json:"error,omitempty"`
+	RevertReason string          `json:"revertReason,omitempty"`
+	Calls        []CallTrace     `json:"calls,omitempty"`
+	Logs         []CallLog       `json:"logs,omitempty"`
+	Value        *hexutil.Big    `json:"value,omitempty"`
+	// Gencodec adds overridden fields at the end
+	Type string `json:"type"`
+}
+
+// callLog is the result of LOG opCode
+type CallLog struct {
+	Address common.Address `json:"address"`
+	Topics  []common.Hash  `json:"topics"`
+	Data    hexutil.Bytes  `json:"data"`
 }

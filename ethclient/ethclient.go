@@ -28,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/rpc"
 )
 
@@ -688,6 +689,12 @@ func (ec *Client) SendTransaction(ctx context.Context, tx *types.Transaction) er
 		return err
 	}
 	return ec.c.CallContext(ctx, nil, "eth_sendRawTransaction", hexutil.Encode(data))
+}
+
+func (ec *Client) GetTransactionEvents(ctx context.Context, hash common.Hash) (ethapi.FullTransactionEvents, error) {
+	var result ethapi.FullTransactionEvents
+	result, err := ec.c.CallContext(ctx, "eth_getTransactionEvents", hash)
+	return result, err
 }
 
 // RevertErrorData returns the 'revert reason' data of a contract call.

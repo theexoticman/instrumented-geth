@@ -11,16 +11,17 @@ import (
 
 // SimulatedChainStore stores simulated blocks, receipts and txs for local-only chain state.
 type SimulatedChainStore struct {
-	txMu       sync.RWMutex
-	blocksMu   sync.RWMutex
-	receiptsMu sync.RWMutex
-	accountsMu sync.RWMutex
-	blocks     []*types.Block                     // Ordered simulated blocks
-	blockMap   map[common.Hash]*types.Block       // block hash -> block
-	txs        map[common.Hash]*types.Transaction // tx hash -> tx
-	receipts   map[common.Hash]*types.Receipt     // tx hash -> receipt
-	blockTxs   map[uint64][]common.Hash           // block number -> list of tx hashes
-	accounts   map[common.Address]*SimulatedAccount
+	txMu         sync.RWMutex
+	blocksMu     sync.RWMutex
+	receiptsMu   sync.RWMutex
+	accountsMu   sync.RWMutex
+	blocks       []*types.Block                     // Ordered simulated blocks
+	blockMap     map[common.Hash]*types.Block       // block hash -> block
+	txs          map[common.Hash]*types.Transaction // tx hash -> tx
+	receipts     map[common.Hash]*types.Receipt     // tx hash -> receipt
+	blockTxs     map[uint64][]common.Hash           // block number -> list of tx hashes
+	accounts     map[common.Address]*SimulatedAccount
+	fullTxEvents map[common.Hash]FullTransactionEvents
 }
 
 type SimulatedAccount struct {
@@ -32,12 +33,21 @@ type SimulatedAccount struct {
 // NewSimulatedChainStore creates a new empty simulated store.
 func NewSimulatedChainStore() *SimulatedChainStore {
 	return &SimulatedChainStore{
-		blockMap: make(map[common.Hash]*types.Block),
-		txs:      make(map[common.Hash]*types.Transaction),
-		receipts: make(map[common.Hash]*types.Receipt),
-		blockTxs: make(map[uint64][]common.Hash),
-		accounts: make(map[common.Address]*SimulatedAccount),
+		blockMap:     make(map[common.Hash]*types.Block),
+		txs:          make(map[common.Hash]*types.Transaction),
+		receipts:     make(map[common.Hash]*types.Receipt),
+		blockTxs:     make(map[uint64][]common.Hash),
+		accounts:     make(map[common.Address]*SimulatedAccount),
+		fullTxEvents: make(map[common.Hash]FullTransactionEvents),
 	}
+}
+
+// GetTransaction returns a transaction by its hash.
+func (s *SimulatedChainStore) GetTxEvents(txHash common.Hash) (FullTransactionEvents, bool) {
+	s.txMu.RLock()
+	defer s.txMu.RUnlock()
+	tx, ok := s.fullTxEvents[txHash]
+	return tx, ok
 }
 
 // GetTransaction returns a transaction by its hash.
@@ -93,10 +103,13 @@ func (s *SimulatedChainStore) GetTransactionsByBlockNumber(num uint64) ([]*types
 	}
 	return txs, true
 }
+func (s *SimulatedChainStore) StoreTxEvents(txHash common.Hash, events FullTransactionEvents) {
+	s.fullTxEvents[txHash] = events
+}
 
-// ExtractSimulatedAccountState extracts the state of all touched accounts from the given state.
+// StoreSimulatedAccountState extracts the state of all touched accounts from the given state.
 // Used to extract the state of the accounts from the final state after simulation.
-func ExtractSimulatedAccountState(_state *state.StateDB) map[common.Address]*SimulatedAccount {
+func StoreSimulatedAccountState(_state *state.StateDB) map[common.Address]*SimulatedAccount {
 	touched := make(map[common.Address]*SimulatedAccount)
 
 	for addr := range _state.Mutations() {
@@ -122,7 +135,7 @@ func ExtractSimulatedAccountState(_state *state.StateDB) map[common.Address]*Sim
 }
 
 // AddAccount inserts or updates the state of an account in the simulated store.
-func (s *SimulatedChainStore) AddSimulatedAccount(account *SimulatedAccount) {
+func (s *SimulatedChainStore) CreateSimulatedAccount(account *SimulatedAccount) {
 	s.accountsMu.Lock()
 	defer s.accountsMu.Unlock()
 
@@ -148,15 +161,17 @@ func (s *SimulatedChainStore) AddSimulatedAccount(account *SimulatedAccount) {
 	}
 }
 
-// AddBlock stores a simulated block and all related txs and receipts.
+// StoreBlock stores a simulated block and all related txs and receipts.
 // It now accepts an optional originalTxHash to use as the storage key for the transaction and receipt.
-func (s *SimulatedChainStore) AddBlock(block *types.Block, receipts []*types.Receipt, originalTxHash *common.Hash) {
+func (s *SimulatedChainStore) StoreBlock(results *simBlockResult, originalTxHash *common.Hash) {
 	s.blocksMu.Lock()
 	defer s.blocksMu.Unlock()
 	s.txMu.Lock()
 	defer s.txMu.Unlock()
 	s.receiptsMu.Lock()
 	defer s.receiptsMu.Unlock()
+	block := results.Block
+	receipts := results.Receipts
 
 	s.blocks = append(s.blocks, block)
 	s.blockMap[block.Hash()] = block
@@ -168,6 +183,7 @@ func (s *SimulatedChainStore) AddBlock(block *types.Block, receipts []*types.Rec
 	}
 
 	for i, tx := range block.Transactions() {
+
 		// Determine the key to use for storage.
 		// Use the provided original hash if available, otherwise use the hash of the reconstructed tx.
 		var storageKey common.Hash
@@ -180,6 +196,10 @@ func (s *SimulatedChainStore) AddBlock(block *types.Block, receipts []*types.Rec
 		s.txs[storageKey] = tx
 		s.receipts[storageKey] = receipts[i]
 		s.blockTxs[blockNumber] = append(s.blockTxs[blockNumber], storageKey)
+
+		// Store the tx events
+		events := results.Calls[i].FTE
+		s.StoreTxEvents(storageKey, events)
 	}
 }
 

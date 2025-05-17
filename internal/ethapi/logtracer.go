@@ -65,6 +65,7 @@ func newTracer(traceTransfers bool, blockNumber uint64, blockHash, txHash common
 		blockHash:      blockHash,
 		txHash:         txHash,
 		txIdx:          txIndex,
+		logs:           make([][]*types.Log, 0),
 	}
 }
 

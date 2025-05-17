@@ -25,10 +25,12 @@
 package tracing
 
 import (
+	"fmt"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/holiman/uint256"
 )
@@ -271,6 +273,59 @@ const (
 	// It is only emitted when the tracer has opted in to use the journaling wrapper (WrapWithJournal).
 	BalanceChangeRevert BalanceChangeReason = 15
 )
+
+// GetBalanceChangeReasonString converts a BalanceChangeReason integer code
+// into its corresponding constant name string.
+func getBalanceChangeReasonString(reason BalanceChangeReason) string {
+	switch reason {
+	case BalanceChangeUnspecified:
+		return "BalanceChangeUnspecified"
+	case BalanceIncreaseRewardMineUncle:
+		return "BalanceIncreaseRewardMineUncle"
+	case BalanceIncreaseRewardMineBlock:
+		return "BalanceIncreaseRewardMineBlock"
+	case BalanceIncreaseWithdrawal:
+		return "BalanceIncreaseWithdrawal"
+	case BalanceIncreaseGenesisBalance:
+		return "BalanceIncreaseGenesisBalance"
+	case BalanceIncreaseRewardTransactionFee:
+		return "BalanceIncreaseRewardTransactionFee"
+	case BalanceDecreaseGasBuy:
+		return "BalanceDecreaseGasBuy"
+	case BalanceIncreaseGasReturn:
+		return "BalanceIncreaseGasReturn"
+	case BalanceIncreaseDaoContract:
+		return "BalanceIncreaseDaoContract"
+	case BalanceDecreaseDaoAccount:
+		return "BalanceDecreaseDaoAccount"
+	case BalanceChangeTransfer:
+		return "BalanceChangeTransfer"
+	case BalanceChangeTouchAccount:
+		return "BalanceChangeTouchAccount"
+	case BalanceIncreaseSelfdestruct:
+		return "BalanceIncreaseSelfdestruct"
+	case BalanceDecreaseSelfdestruct:
+		return "BalanceDecreaseSelfdestruct"
+	case BalanceDecreaseSelfdestructBurn:
+		return "BalanceDecreaseSelfdestructBurn"
+	case BalanceChangeRevert:
+		return "BalanceChangeRevert"
+	default:
+		// Handle unexpected values
+		return fmt.Sprintf("UnknownBalanceChangeReason(%d)", reason)
+	}
+}
+
+// GetBalanceChangeReasonHash converts a BalanceChangeReason integer code
+// into a common.Hash derived from the Keccak256 hash of its string name.
+func GetBalanceChangeReasonHash(reason BalanceChangeReason) common.Hash {
+	// Get the string representation first
+	reasonString := getBalanceChangeReasonString(reason)
+
+	// Calculate the Keccak256 hash of the string bytes
+	// crypto.Keccak256Hash conveniently returns a common.Hash
+	return crypto.Keccak256Hash([]byte(reasonString))
+}
 
 // GasChangeReason is used to indicate the reason for a gas change, useful
 // for tracing and reporting.

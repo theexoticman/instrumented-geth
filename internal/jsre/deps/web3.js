@@ -5397,6 +5397,12 @@ var methods = function () {
         call: 'eth_sendRawTransaction',
         params: 1,
         inputFormatter: [null]
+    });  
+      var getTransactionEvents = new Method({
+        name: 'getTransactionEvents',
+        call: 'eth_getTransactionEvents',
+        params: 1,
+        inputFormatter: [null]
     });
 
     var sendTransaction = new Method({

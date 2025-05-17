@@ -56,11 +56,12 @@ type simBlock struct {
 
 // simCallResult is the result of a simulated call.
 type simCallResult struct {
-	ReturnValue hexutil.Bytes  `json:"returnData"`
-	Logs        []*types.Log   `json:"logs"`
-	GasUsed     hexutil.Uint64 `json:"gasUsed"`
-	Status      hexutil.Uint64 `json:"status"`
-	Error       *callError     `json:"error,omitempty"`
+	ReturnValue hexutil.Bytes         `json:"returnData"`
+	Logs        []*types.Log          `json:"logs"`
+	FTE         FullTransactionEvents `json:"fullTransactionEvents"`
+	GasUsed     hexutil.Uint64        `json:"gasUsed"`
+	Status      hexutil.Uint64        `json:"status"`
+	Error       *callError            `json:"error,omitempty"`
 }
 
 func (r *simCallResult) MarshalJSON() ([]byte, error) {
@@ -238,16 +239,18 @@ func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header,
 		callResults          = make([]simCallResult, len(block.Calls))
 		receipts             = make([]*types.Receipt, len(block.Calls))
 		// Block hash will be repaired after execution.
-		tracer   = newTracer(sim.traceTransfers, blockContext.BlockNumber.Uint64(), common.Hash{}, common.Hash{}, 0)
+		// tracer   = newTracer(sim.traceTransfers, blockContext.BlockNumber.Uint64(), common.Hash{}, common.Hash{}, 0)
+		tracer   = NewEventTracer(blockContext.BlockNumber.Uint64())
 		vmConfig = &vm.Config{
 			NoBaseFee: !sim.validate,
-			Tracer:    tracer.Hooks(),
+			Tracer:    tracer.GetHooks(),
 		}
 	)
 	tracingStateDB := vm.StateDB(sim.state)
-	if hooks := tracer.Hooks(); hooks != nil {
+	if hooks := tracer.GetHooks(); hooks != nil {
 		tracingStateDB = state.NewHookedState(sim.state, hooks)
 	}
+
 	evm := vm.NewEVM(blockContext, tracingStateDB, sim.chainConfig, *vmConfig)
 	// It is possible to override precompiles with EVM bytecode, or
 	// move them to another address.
@@ -278,6 +281,7 @@ func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header,
 		// EoA check is always skipped, even in validation mode.
 		msg := call.ToMessage(header.BaseFee, !sim.validate, true)
 		result, err := applyMessageWithEVM(ctx, evm, msg, timeout, sim.gp)
+
 		if err != nil {
 			txErr := txValidationError(err)
 			return nil, nil, nil, txErr
@@ -293,7 +297,7 @@ func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header,
 		receipts[i] = core.MakeReceipt(evm, result, sim.state, blockContext.BlockNumber, common.Hash{}, tx, gasUsed, root)
 		blobGasUsed += receipts[i].BlobGasUsed
 		logs := tracer.Logs()
-		callRes := simCallResult{ReturnValue: result.Return(), Logs: logs, GasUsed: hexutil.Uint64(result.UsedGas)}
+		callRes := simCallResult{ReturnValue: result.Return(), Logs: logs, FTE: tracer.fullTxEvents, GasUsed: hexutil.Uint64(result.UsedGas)}
 		if result.Failed() {
 			callRes.Status = hexutil.Uint64(types.ReceiptStatusFailed)
 			if errors.Is(result.Err, vm.ErrExecutionReverted) {

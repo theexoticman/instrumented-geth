@@ -115,4 +115,52 @@ func TestSimulateSimpleTransfer(t *testing.T) {
 
 	zAmount, _ := uint256.FromBig(big.NewInt(0))
 	assert.True(t, accountStateRecipient.Balance.Cmp(zAmount) > 0, "recipient should have received funds")
+
+}
+
+// TestEventTracer test if the event tracer works and collect the logs and generate the new custom structure correctly
+//
+
+func TestEventTracer(t *testing.T) {
+	backend, ethService, senderKey, senderAddr := setupSimulatedEthereum(t)
+	defer backend.Close()
+
+	ctx := context.Background()
+	client := ethclient.NewClient(backend.Node().Attach())
+
+	recipient1Key, _ := crypto.GenerateKey()
+	recipient1Addr := crypto.PubkeyToAddress(recipient1Key.PublicKey)
+
+	recipient2Key, _ := crypto.GenerateKey()
+	recipient2Addr := crypto.PubkeyToAddress(recipient2Key.PublicKey)
+
+	nonce, err := client.PendingNonceAt(ctx, senderAddr)
+	assert.NoError(t, err)
+
+	gasPrice, err := client.SuggestGasPrice(ctx)
+	assert.NoError(t, err)
+
+	amount := big.NewInt(1e17)
+	tx1 := types.NewTransaction(nonce, recipient1Addr, amount, 21000, gasPrice, nil)
+	tx2 := types.NewTransaction(nonce, recipient2Addr, amount, 21000, gasPrice, nil)
+	signer := types.LatestSignerForChainID(big.NewInt(1337))
+	signedTx1, err := types.SignTx(tx1, signer, senderKey)
+	signedTx2, err := types.SignTx(tx2, signer, senderKey)
+
+	assert.NoError(t, err)
+
+	// RLP encode the transaction for SendRawTransaction
+	rlpTx1, err := signedTx1.MarshalBinary()
+	rlpTx2, err := signedTx2.MarshalBinary()
+	assert.NoError(t, err)
+
+	// Get the TransactionAPI
+	// Pass the ethService itself, as it implements the ethapi.Backend interface
+	// and also provides the IsSimulateMode/SimChainStore methods needed by the simulation check.
+	txAPI := ethapi.NewTransactionAPI(ethService.APIBackend, new(ethapi.AddrLocker))
+
+	// Call SendRawTransaction, which uses simulateAndStore internally in simulate mode
+	txHash1, err := txAPI.SendRawTransaction(ctx, rlpTx1)
+	txHash2, err := txAPI.SendRawTransaction(ctx, rlpTx2)
+
 }

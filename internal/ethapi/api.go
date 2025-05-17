@@ -897,12 +897,12 @@ func StoreSimulatedArtifacts(simStore *SimulatedChainStore, results []*simBlockR
 				originalHash = &h
 			}
 			// adds block, txs, and receipts, potentially using the original hash
-			simStore.AddBlock(res.Block, res.Receipts, originalHash)
+			simStore.StoreBlock(res, originalHash)
 		}
 
-		for _, account := range ExtractSimulatedAccountState(state) {
+		for _, account := range StoreSimulatedAccountState(state) {
 			if account != nil {
-				simStore.AddSimulatedAccount(account)
+				simStore.CreateSimulatedAccount(account)
 			}
 		}
 	}
@@ -1631,6 +1631,33 @@ func (api *TransactionAPI) SendRawTransaction(ctx context.Context, input hexutil
 		}
 	}
 	// normal geth logic
+
+	return SubmitTransaction(ctx, api.b, tx)
+}
+
+// SendRawTransaction will add the signed transaction to the transaction pool.
+// The sender is responsible for signing the transaction and using the correct nonce.
+func (api *TransactionAPI) SendRawTransactionBackup(ctx context.Context, input hexutil.Bytes) (common.Hash, error) {
+	// normal geth logic
+	tx := new(types.Transaction)
+	if err := tx.UnmarshalBinary(input); err != nil {
+		return common.Hash{}, err
+	}
+
+	// Simulated mode logic
+	if simB, ok := api.b.(interface {
+		IsSimulateMode() bool
+		SimChainStore() *SimulatedChainStore
+	}); ok {
+		if simB.IsSimulateMode() {
+			// Simulate transaction logic here
+			if err := simulateAndStore(ctx, api.b, tx); err != nil {
+				return common.Hash{}, err
+			}
+			return tx.Hash(), nil
+		}
+	}
+	// normal geth logic
 	return SubmitTransaction(ctx, api.b, tx)
 }
 
@@ -2011,6 +2038,21 @@ func simulateAndStore(ctx context.Context, backend Backend, tx *types.Transactio
 
 	return nil
 }
+
+func (api *TransactionAPI) GetTransactionEventsFromBackend(ctx context.Context, backend Backend, txHash common.Hash) (FullTransactionEvents, error) {
+	if simStoreProvider, ok := backend.(interface {
+		SimChainStore() *SimulatedChainStore
+		IsSimulateMode() bool // Corrected: Use exported method name
+	}); ok && simStoreProvider.IsSimulateMode() { // Corrected: Call exported method
+		simStore := simStoreProvider.SimChainStore()
+		events, ok := simStore.GetTxEvents(txHash)
+		if !ok {
+			return FullTransactionEvents{}, fmt.Errorf("transaction events not found")
+		}
+		return events, nil
+	}
+	return FullTransactionEvents{}, fmt.Errorf("simulation store not found")
+}
 func TransactionArgsFromTransaction(tx *types.Transaction) TransactionArgs {
 	nonce := hexutil.Uint64(tx.Nonce())
 	gas := hexutil.Uint64(tx.Gas())
@@ -2065,4 +2107,34 @@ func TransactionArgsFromTransaction(tx *types.Transaction) TransactionArgs {
 	args.From = &from
 
 	return args
+}
+
+type YourCustomEvent struct {
+	Name      string         `json:"name"`
+	Address   common.Address `json:"address"`
+	Topics    []common.Hash  `json:"topics"`
+	Data      hexutil.Bytes  `json:"data"`
+	BlockHash common.Hash    `json:"blockHash"`
+	TxHash    common.Hash    `json:"transactionHash"`
+}
+
+func (api *TransactionAPI) GetTransactionEvents(ctx context.Context, hash common.Hash) (FullTransactionEvents, error) {
+	// Check if the backend supports simulate mode and has a SimChainStore
+	if simB, ok := api.b.(interface {
+		SimChainStore() *SimulatedChainStore
+		IsSimulateMode() bool
+	}); ok && simB.IsSimulateMode() {
+		if events, ok := simB.SimChainStore().GetTxEvents(hash); !ok {
+			return FullTransactionEvents{}, fmt.Errorf("no events found for transaction %s", hash.Hex())
+		} else {
+
+			return events, nil
+		}
+	}
+
+	return FullTransactionEvents{}, fmt.Errorf("backend does not support simulation or is not in simulate mode")
+}
+
+type SimChainStoreBackend interface {
+	SimChainStore() *SimulatedChainStore
 }
