@@ -1,3 +1,14 @@
+## IntentGuard Instrumented Node
+### Goal
+
+The IntentGuard Blockchain Node is a customized Ethereum node equipped with advanced capabilities to simulate transactions and protect users from malicious MEV and scams.
+
+### Features
+
+- Statefull Simulation
+- Simulation Comparison
+- EVM Instrumentation
+
 ## Go Ethereum
 
 Golang execution layer implementation of the Ethereum protocol.
