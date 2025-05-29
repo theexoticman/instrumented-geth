@@ -209,6 +209,7 @@ func (s *SimulatedChainStore) StoreBlock(results *simBlockResult, originalTxHash
 		s.blockTxs[blockNumber] = append(s.blockTxs[blockNumber], storageKey)
 
 		// Store the tx events
+
 		events := results.Calls[i].FTE
 		s.StoreTxEvents(storageKey, events)
 	}

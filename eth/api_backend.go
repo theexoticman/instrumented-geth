@@ -19,6 +19,7 @@ package eth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/big"
 	"time"
 
@@ -49,6 +50,8 @@ type EthAPIBackend struct {
 	allowUnprotectedTxs bool
 	eth                 *Ethereum
 	gpo                 *gasprice.Oracle
+	SimStore            *ethapi.SimulatedChainStore // Add this field
+	SimulateModeEnabled bool
 }
 
 // ChainConfig returns the active chain configuration.
@@ -438,6 +441,7 @@ func (b *EthAPIBackend) SimChainStore() *ethapi.SimulatedChainStore {
 	return b.eth.SimChainStore() // Calls the SimChainStore method on the *Ethereum instance
 }
 
-// func (b *EthAPIBackend) GetTracerEvents() *ethapi.SimulatedChainStore {
-
-// }
+func (b *EthAPIBackend) GetTransactionEvents(ctx context.Context, hash common.Hash) (*ethapi.FullTransactionEvents, error) {
+	// PoC Stub for non-simulate path
+	return nil, fmt.Errorf("GetTransactionEvents on EthAPIBackend: non-simulate mode path is a stub for PoC")
+}

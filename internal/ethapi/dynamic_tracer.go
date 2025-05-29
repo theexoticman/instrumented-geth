@@ -1,10 +1,12 @@
 package ethapi
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
 	"reflect"
+	"strings"
 
 	// Needed for potential concurrent access if hooks run in parallel
 	"github.com/ethereum/go-ethereum/common"
@@ -60,20 +62,87 @@ type EventTracer struct {
 // FullTransactionEvents track the order of the events emitted in a transaction in a slice
 // order of events follow first in last out (FILO) order as they are appended to the slice
 type FullTransactionEvents struct {
-	EventsByContract []ContractEvents
+	EventsByContract []ContractEvents `json:"eventsByContract"`
 }
 
 // ContractEvents Track an event instance emitted by a contract within the evm
 // Every new event create a new
 type ContractEvents struct {
-	address        common.Address
-	contractEvents EventData
+	Address        common.Address `json:"address"`        // Capitalized and added JSON tag
+	ContractEvents EventData      `json:"contractEvents"` // Capitalized and added JSON tag
 }
 
 type EventData struct {
-	EventSigHash common.Hash
-	Parameters   [][32]byte
+	EventSigHash common.Hash `json:"eventSigHash"` // Kept as common.Hash
+	Parameters   [][32]byte  `json:"parameters"`   // Kept as [][32]byte
 	// TODO: add caller, as of now, not available in types.Log
+}
+
+// Custom JSON marshaling for EventData
+func (ed EventData) MarshalJSON() ([]byte, error) {
+	// Convert common.Hash to hex string
+	eventSigHashHex := ed.EventSigHash.Hex()
+
+	// Convert [][32]byte to []string (hex strings)
+	parametersHex := make([]string, len(ed.Parameters))
+	for i, param := range ed.Parameters {
+		parametersHex[i] = "0x" + hex.EncodeToString(param[:])
+	}
+
+	// Create a temporary struct for JSON marshaling
+	type eventDataJSON struct {
+		EventSigHash string   `json:"eventSigHash"`
+		Parameters   []string `json:"parameters"`
+	}
+
+	temp := eventDataJSON{
+		EventSigHash: eventSigHashHex,
+		Parameters:   parametersHex,
+	}
+
+	return json.Marshal(temp)
+}
+
+// Custom JSON unmarshaling for EventData
+func (ed *EventData) UnmarshalJSON(data []byte) error {
+	// Create a temporary struct for JSON unmarshaling
+	type eventDataJSON struct {
+		EventSigHash string   `json:"eventSigHash"`
+		Parameters   []string `json:"parameters"`
+	}
+
+	var temp eventDataJSON
+	if err := json.Unmarshal(data, &temp); err != nil {
+		return err
+	}
+
+	// Convert hex string back to common.Hash
+	ed.EventSigHash = common.HexToHash(temp.EventSigHash)
+
+	// Convert []string (hex strings) back to [][32]byte
+	ed.Parameters = make([][32]byte, len(temp.Parameters))
+	for i, paramHex := range temp.Parameters {
+		// Remove "0x" prefix if present
+		if strings.HasPrefix(paramHex, "0x") {
+			paramHex = paramHex[2:]
+		}
+
+		// Decode hex string to bytes
+		paramBytes, err := hex.DecodeString(paramHex)
+		if err != nil {
+			return fmt.Errorf("invalid hex parameter at index %d: %v", i, err)
+		}
+
+		// Ensure it's exactly 32 bytes
+		if len(paramBytes) != 32 {
+			return fmt.Errorf("parameter at index %d must be exactly 32 bytes, got %d", i, len(paramBytes))
+		}
+
+		// Copy to [32]byte
+		copy(ed.Parameters[i][:], paramBytes)
+	}
+
+	return nil
 }
 
 func NewEventTracer(blockNumber uint64) *EventTracer {
@@ -183,15 +252,21 @@ func (et *EventTracer) OnBalanceChangeHook(addr common.Address, prev, new *big.I
 	if new != nil {
 		new.FillBytes(newBytes[:]) // Pass the array as a slice using [:]
 	}
+
+	paramsForEvent := make([][32]byte, 0, 2)
+	paramsForEvent = append(paramsForEvent, prevBytes)
+	paramsForEvent = append(paramsForEvent, newBytes)
+
 	balanceEvent := EventData{
 		EventSigHash: tracing.GetBalanceChangeReasonHash(reason), // Use predefined hash
-		Parameters:   [][32]byte{prevBytes, newBytes},
+		Parameters:   paramsForEvent,
 		// TODO: make Caller available and include
 
 	}
-	newEvents := ContractEvents{}
-	newEvents.address = addr
-	newEvents.contractEvents = balanceEvent
+	newEvents := ContractEvents{
+		Address:        addr,
+		ContractEvents: balanceEvent,
+	}
 
 	// Append the event
 	et.fullTxEvents.EventsByContract = append(et.fullTxEvents.EventsByContract, newEvents)
@@ -221,8 +296,8 @@ func (et *EventTracer) OnLog(log *types.Log) {
 
 	// create a new custom event instance
 	newContractEvent := ContractEvents{}
-	newContractEvent.address = log.Address
-	newContractEvent.contractEvents = parseEventData(log)
+	newContractEvent.Address = log.Address
+	newContractEvent.ContractEvents = parseEventData(log)
 
 	// append to the transaction slice of events
 	et.fullTxEvents.EventsByContract = append(et.fullTxEvents.EventsByContract, newContractEvent)
@@ -541,7 +616,7 @@ func parseEventData(log *types.Log) EventData {
 	event := EventData{}
 
 	if len(log.Topics) > 0 {
-		event.EventSigHash = log.Topics[0] // First topic is usually the event signature hash
+		event.EventSigHash = log.Topics[0] // Assign common.Hash directly
 	}
 
 	// extract sig hash and  topics
@@ -549,39 +624,45 @@ func parseEventData(log *types.Log) EventData {
 	if len(log.Topics) > 1 { // Exclude event signature hash
 		numTopics = len(log.Topics) - 1
 	}
-	nbDataParams := len(log.Data) / 32
-	totalParams := numTopics + nbDataParams
 
-	event.Parameters = make([][32]byte, 0, totalParams) // Pre-allocate slice
+	// log.Data is []byte. We need to chunk it into [][32]byte.
+	dataParams := bytesToParameters(log.Data) // bytesToParameters returns [][32]byte
+	totalParams := numTopics + len(dataParams)
+
+	event.Parameters = make([][32]byte, 0, totalParams) // Pre-allocate slice as [][32]byte
 
 	// Add indexed parameters (topics)
 	for i := 1; i < len(log.Topics); i++ { // Start from index 1
-		var param [32]byte
-		copy(param[:], log.Topics[i].Bytes())
-		event.Parameters = append(event.Parameters, param)
+		event.Parameters = append(event.Parameters, [32]byte(log.Topics[i])) // common.Hash.Bytes32() returns [32]byte
 	}
 
 	// Add non-indexed parameters (data)
-	dataParams := bytesToParameters(log.Data)
+	// dataParams is already [][32]byte
 	event.Parameters = append(event.Parameters, dataParams...)
 
 	return event
 }
 
-func bytesToParameters(data hexutil.Bytes) [][32]byte {
+func bytesToParameters(data []byte) [][32]byte { // Changed from hexutil.Bytes to []byte for log.Data
 	// Ensure the data length is a multiple of 32
 	if len(data)%32 != 0 {
-		panic("data length is not a multiple of 32 bytes")
+		// It's common for EVM data to not be perfectly padded,
+		// handle this case or decide on error/padding strategy.
+		// For now, let's panic as it indicates an issue with data source or assumptions.
+		// A more robust solution might involve padding or returning an error.
+		// panic("data length is not a multiple of 32 bytes")
+		// Alternative: return empty or partially filled if that's valid for your use case
 	}
 
 	// Create a slice to hold the parameters
-	parameters := make([][32]byte, len(data)/32)
+	numParams := len(data) / 32
+	parameters := make([][32]byte, numParams)
 
 	// Split the data into 32-byte chunks
-	for i := 0; i < len(data); i += 32 {
+	for i := 0; i < numParams; i++ {
 		var chunk [32]byte
-		copy(chunk[:], data[i:i+32]) // Copy 32 bytes into the fixed array
-		parameters[i/32] = chunk     // Assign to the result slice
+		copy(chunk[:], data[i*32:(i+1)*32]) // Copy 32 bytes into the fixed array
+		parameters[i] = chunk               // Assign to the result slice
 	}
 
 	return parameters

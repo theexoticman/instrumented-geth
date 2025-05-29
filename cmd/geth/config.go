@@ -184,6 +184,9 @@ func makeConfigNode(ctx *cli.Context) (*node.Node, gethConfig) {
 // makeFullNode loads geth configuration and creates the Ethereum backend.
 func makeFullNode(ctx *cli.Context, simulateMode bool) (*node.Node, *eth.Ethereum) {
 	stack, cfg := makeConfigNode(ctx)
+	// quick win. adding simulate mode to the config
+	cfg.Eth.SimulateMode = simulateMode
+
 	if ctx.IsSet(utils.OverridePrague.Name) {
 		v := ctx.Uint64(utils.OverridePrague.Name)
 		cfg.Eth.OverridePrague = &v

@@ -82,6 +82,8 @@ type Backend interface {
 	TxPoolContent() (map[common.Address][]*types.Transaction, map[common.Address][]*types.Transaction)
 	TxPoolContentFrom(addr common.Address) ([]*types.Transaction, []*types.Transaction)
 	SubscribeNewTxsEvent(chan<- core.NewTxsEvent) event.Subscription
+	// New GetEvents endpoint
+	GetTransactionEvents(ctx context.Context, hash common.Hash) (*FullTransactionEvents, error)
 
 	ChainConfig() *params.ChainConfig
 	Engine() consensus.Engine

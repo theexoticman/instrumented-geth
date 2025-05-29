@@ -864,9 +864,9 @@ func (api *BlockChainAPI) SimulateV1IPSP(ctx context.Context, opts simOpts, bloc
 	// Store simulated artifacts if supported
 	if simStore, ok := api.b.(interface {
 		SimChainStore() *SimulatedChainStore
-		isSimulateMode() bool
-	}); ok && simStore.isSimulateMode() {
-		fmt.Printf("simulation activited %v \n", simStore.isSimulateMode())
+		IsSimulateMode() bool
+	}); ok && simStore.IsSimulateMode() {
+		fmt.Printf("simulation activited %v \n", simStore.IsSimulateMode())
 		StoreSimulatedArtifacts(simStore.SimChainStore(), results, sim.state, originalTx) // Pass nil for originalTx here
 	}
 
@@ -2117,19 +2117,23 @@ type YourCustomEvent struct {
 	TxHash    common.Hash    `json:"transactionHash"`
 }
 
-func (api *TransactionAPI) GetTransactionEvents(ctx context.Context, result *FullTransactionEvents, hash common.Hash) error {
+func (api *TransactionAPI) GetTransactionEvents(ctx context.Context, hash common.Hash) (*FullTransactionEvents, error) {
 	// Check if the backend supports simulate mode and has a SimChainStore
 	if simB, ok := api.b.(interface {
 		SimChainStore() *SimulatedChainStore
 		IsSimulateMode() bool
 	}); ok && simB.IsSimulateMode() {
-		if events, found := simB.SimChainStore().GetTxEvents(hash); found {
-			*result = events
-			return nil
+		store := simB.SimChainStore()
+		if store == nil {
+			return nil, fmt.Errorf("simulate mode is active, but SimChainStore is nil")
 		}
-		return fmt.Errorf("no events found for transaction %s", hash.Hex())
+		if events, found := store.GetTxEvents(hash); found {
+			return &events, nil // Return pointer to the events
+		}
+		return nil, fmt.Errorf("no events found for transaction %s in simulate mode store", hash.Hex())
 	}
-	return fmt.Errorf("backend does not support simulation or is not in simulate mode")
+	// For PoC: If not in simulate mode, this path is not critical.
+	return nil, fmt.Errorf("not in simulate mode or backend does not support simulate methods; this path is not the focus of the PoC")
 }
 
 type SimChainStoreBackend interface {

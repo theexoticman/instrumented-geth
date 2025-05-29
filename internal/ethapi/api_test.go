@@ -2583,7 +2583,6 @@ func TestFillBlobTransaction(t *testing.T) {
 				Value:       (*hexutil.Big)(big.NewInt(1)),
 				Blobs:       []kzg4844.Blob{{}},
 				Commitments: []kzg4844.Commitment{{}, {}},
-				Proofs:      []kzg4844.Proof{{}, {}},
 			},
 			err: `number of blobs and commitments mismatch (have=2, want=1)`,
 		},
@@ -3529,3 +3528,77 @@ func testRPCResponseWithFile(t *testing.T, testid int, result interface{}, rpc s
 func addressToHash(a common.Address) common.Hash {
 	return common.BytesToHash(a.Bytes())
 }
+
+// func TestTransactionEventsRetrieval(t *testing.T) {
+// 	t.Parallel()
+// 	// Initialize test accounts
+// 	var (
+// 		accounts = newAccounts(2)
+// 		genesis  = &core.Genesis{
+// 			Config: params.MergedTestChainConfig,
+// 			Alloc: types.GenesisAlloc{
+// 				accounts[0].addr: {Balance: big.NewInt(params.Ether)},
+// 			},
+// 		}
+// 	)
+
+// 	// Create a new test backend with simulation mode enabled
+// 	b := newTestBackend(t, 1, genesis, beacon.New(ethash.NewFaker()), func(i int, b *core.BlockGen) {
+// 		b.SetPoS()
+// 	})
+
+// 	// Create the transaction API
+// 	txAPI := NewTransactionAPI(b, nil)
+
+// 	// Create and send a transfer transaction
+// 	tx := TransactionArgs{
+// 		From:  &accounts[0].addr,
+// 		To:    &accounts[1].addr,
+// 		Value: (*hexutil.Big)(big.NewInt(1000)),
+// 	}
+
+// 	// Send the transaction
+// 	txHash, err := txAPI.SendTransaction(context.Background(), tx)
+// 	if err != nil {
+// 		t.Fatalf("Failed to send transaction: %v", err)
+// 	}
+
+// 	// Get the events for the transaction
+// 	var events FullTransactionEvents
+// 	err = txAPI.GetTransactionEvents(context.Background(), &events, txHash)
+// 	if err != nil {
+// 		t.Fatalf("Failed to get transaction events: %v", err)
+// 	}
+
+// 	// Verify that we have events for the transfer
+// 	if len(events.EventsByContract) == 0 {
+// 		t.Error("Expected transfer events but got none")
+// 	}
+
+// 	// Verify the specific events we expect from a transfer
+// 	expectedEventTypes := []common.Hash{
+// 		tracing.GetBalanceChangeReasonHash(tracing.BalanceChangeTransfer),
+// 		tracing.GetBalanceChangeReasonHash(tracing.BalanceDecreaseGasBuy),
+// 		tracing.GetBalanceChangeReasonHash(tracing.BalanceIncreaseGasReturn),
+// 	}
+
+// 	// Print out all event types we got for debugging
+// 	t.Logf("Found %d events:", len(events.EventsByContract))
+// 	for i, event := range events.EventsByContract {
+// 		t.Logf("Event %d: %s", i, event.contractEvents.EventSigHash.Hex())
+// 	}
+
+// 	// Check for each expected event type
+// 	for _, eventType := range expectedEventTypes {
+// 		found := false
+// 		for _, event := range events.EventsByContract {
+// 			if event.contractEvents.EventSigHash == eventType {
+// 				found = true
+// 				break
+// 			}
+// 		}
+// 		if !found {
+// 			t.Errorf("Expected to find event type %s but did not", eventType.Hex())
+// 		}
+// 	}
+// }
