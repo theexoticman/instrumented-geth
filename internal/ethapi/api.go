@@ -861,7 +861,6 @@ func (api *BlockChainAPI) SimulateV1IPSP(ctx context.Context, opts simOpts, bloc
 		return nil, err, nil
 	}
 
-	// fmt.Printf("simulation activited %v \n", false)
 	// Store simulated artifacts if supported
 	if simStore, ok := api.b.(interface {
 		SimChainStore() *SimulatedChainStore
@@ -2010,7 +2009,7 @@ func simulateAndStore(ctx context.Context, backend Backend, tx *types.Transactio
 	// Simulation options
 	opts := simOpts{
 		BlockStateCalls:        []simBlock{simBlockInstance},
-		TraceTransfers:         false,
+		TraceTransfers:         true,
 		Validation:             true,
 		ReturnFullTransactions: true,
 	}
@@ -2118,21 +2117,19 @@ type YourCustomEvent struct {
 	TxHash    common.Hash    `json:"transactionHash"`
 }
 
-func (api *TransactionAPI) GetTransactionEvents(ctx context.Context, hash common.Hash) (FullTransactionEvents, error) {
+func (api *TransactionAPI) GetTransactionEvents(ctx context.Context, result *FullTransactionEvents, hash common.Hash) error {
 	// Check if the backend supports simulate mode and has a SimChainStore
 	if simB, ok := api.b.(interface {
 		SimChainStore() *SimulatedChainStore
 		IsSimulateMode() bool
 	}); ok && simB.IsSimulateMode() {
-		if events, ok := simB.SimChainStore().GetTxEvents(hash); !ok {
-			return FullTransactionEvents{}, fmt.Errorf("no events found for transaction %s", hash.Hex())
-		} else {
-
-			return events, nil
+		if events, found := simB.SimChainStore().GetTxEvents(hash); found {
+			*result = events
+			return nil
 		}
+		return fmt.Errorf("no events found for transaction %s", hash.Hex())
 	}
-
-	return FullTransactionEvents{}, fmt.Errorf("backend does not support simulation or is not in simulate mode")
+	return fmt.Errorf("backend does not support simulation or is not in simulate mode")
 }
 
 type SimChainStoreBackend interface {

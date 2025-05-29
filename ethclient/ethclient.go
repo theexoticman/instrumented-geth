@@ -693,8 +693,11 @@ func (ec *Client) SendTransaction(ctx context.Context, tx *types.Transaction) er
 
 func (ec *Client) GetTransactionEvents(ctx context.Context, hash common.Hash) (ethapi.FullTransactionEvents, error) {
 	var result ethapi.FullTransactionEvents
-	result, err := ec.c.CallContext(ctx, "eth_getTransactionEvents", hash)
-	return result, err
+	err := ec.c.CallContext(ctx, &result, "eth_getTransactionEvents", hash.Hex())
+	if err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 // RevertErrorData returns the 'revert reason' data of a contract call.

@@ -1,6 +1,8 @@
 package ethapi
 
 import (
+	"fmt"
+	"os"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -9,7 +11,13 @@ import (
 	"github.com/holiman/uint256"
 )
 
-// SimulatedChainStore stores simulated blocks, receipts and txs for local-only chain state.
+// SimulatedChainStore stores persists simulated transactions, blocks, receipts and txs for local-only chain state.
+// it is used to make demos on mainnet without having to:
+// 1. pay for gas on mainnet
+// 2. moving funds during demo and having to move them back to the original account
+// 3. this node will provide clients the state as if the simulation was run on mainnet.
+// so you wallet connect to this node, will look like the transaction actually happened on mainnet but it did not.
+
 type SimulatedChainStore struct {
 	txMu         sync.RWMutex
 	blocksMu     sync.RWMutex
@@ -192,6 +200,9 @@ func (s *SimulatedChainStore) StoreBlock(results *simBlockResult, originalTxHash
 		} else {
 			storageKey = tx.Hash() // Hash of reconstructed tx
 		}
+
+		fmt.Println("storageKey", storageKey)
+		os.Stdout.Sync()
 
 		s.txs[storageKey] = tx
 		s.receipts[storageKey] = receipts[i]

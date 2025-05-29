@@ -19,7 +19,9 @@ package ethapi
 import (
 	"context"
 	"crypto/ecdsa"
+	"fmt"
 	"math/big"
+	"os"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -119,7 +121,6 @@ func TestSimulateSimpleTransfer(t *testing.T) {
 }
 
 // TestEventTracer test if the event tracer works and collect the logs and generate the new custom structure correctly
-//
 
 func TestEventTracer(t *testing.T) {
 	backend, ethService, senderKey, senderAddr := setupSimulatedEthereum(t)
@@ -145,12 +146,14 @@ func TestEventTracer(t *testing.T) {
 	tx2 := types.NewTransaction(nonce, recipient2Addr, amount, 21000, gasPrice, nil)
 	signer := types.LatestSignerForChainID(big.NewInt(1337))
 	signedTx1, err := types.SignTx(tx1, signer, senderKey)
+	assert.NoError(t, err)
 	signedTx2, err := types.SignTx(tx2, signer, senderKey)
 
 	assert.NoError(t, err)
 
 	// RLP encode the transaction for SendRawTransaction
 	rlpTx1, err := signedTx1.MarshalBinary()
+	assert.NoError(t, err)
 	rlpTx2, err := signedTx2.MarshalBinary()
 	assert.NoError(t, err)
 
@@ -161,6 +164,24 @@ func TestEventTracer(t *testing.T) {
 
 	// Call SendRawTransaction, which uses simulateAndStore internally in simulate mode
 	txHash1, err := txAPI.SendRawTransaction(ctx, rlpTx1)
+	if err != nil {
+		fmt.Println("error", err)
+	}
 	txHash2, err := txAPI.SendRawTransaction(ctx, rlpTx2)
+	if err != nil {
+		fmt.Println("error", err)
+	}
 
+	fmt.Println("txHash1", txHash1)
+	fmt.Println("txHash2", txHash2)
+	os.Stdout.Sync()
+	//Get the events txHash1
+	events, _ := ethService.SimChainStore().GetTxEvents(txHash1)
+	assert.Equal(t, 4, len(events.EventsByContract), "events should be stored in SimChainStore")
+
+	//Get the events txHash2
+	events, _ = ethService.SimChainStore().GetTxEvents(txHash2)
+	assert.Equal(t, 4, len(events.EventsByContract), "events should be stored in SimChainStore")
+
+	//Get the events txHash1
 }

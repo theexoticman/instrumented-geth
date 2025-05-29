@@ -60,7 +60,7 @@ type EventTracer struct {
 // FullTransactionEvents track the order of the events emitted in a transaction in a slice
 // order of events follow first in last out (FILO) order as they are appended to the slice
 type FullTransactionEvents struct {
-	eventsByContract []ContractEvents
+	EventsByContract []ContractEvents
 }
 
 // ContractEvents Track an event instance emitted by a contract within the evm
@@ -99,7 +99,7 @@ func NewTransactionEvents() FullTransactionEvents {
 	fullTransactionEvents := FullTransactionEvents{}
 
 	// intiialize the slice of events
-	fullTransactionEvents.eventsByContract = make([]ContractEvents, 0)
+	fullTransactionEvents.EventsByContract = make([]ContractEvents, 0)
 	return fullTransactionEvents
 
 }
@@ -114,11 +114,12 @@ func (et *EventTracer) reset(txHash common.Hash, txIdx uint) {
 func (dr *EventTracer) GetHooks() *tracing.Hooks {
 	return &tracing.Hooks{
 		// VM events
-		OnTxStart:    dr.OnTxStart,
-		OnEnter:      dr.onEnter,
-		OnExit:       dr.ExitHook,
-		OnCodeChange: dr.OnCodeChange,
-		OnLog:        dr.OnLog,
+		OnTxStart:       dr.OnTxStart,
+		OnEnter:         dr.onEnter,
+		OnExit:          dr.ExitHook,
+		OnCodeChange:    dr.OnCodeChange,
+		OnLog:           dr.OnLog,
+		OnBalanceChange: dr.OnBalanceChangeHook,
 	}
 }
 
@@ -160,7 +161,7 @@ func (et *EventTracer) ExitHook(depth int, output []byte, gasUsed uint64, err er
 // OnOpcode is called before an opcode is executed.
 func (dr *EventTracer) OpcodeHook(pc uint64, op byte, gas, cost uint64, scope tracing.OpContext, rData []byte, depth int, err error) {
 	// TODO: evaluate if we need to capture the opcode here if we already have the logs hook
-	return
+
 }
 
 // FaultHook is called when the EVM encounters an error during opcode execution.
@@ -193,8 +194,7 @@ func (et *EventTracer) OnBalanceChangeHook(addr common.Address, prev, new *big.I
 	newEvents.contractEvents = balanceEvent
 
 	// Append the event
-	et.fullTxEvents.eventsByContract = append(et.fullTxEvents.eventsByContract, newEvents)
-	return
+	et.fullTxEvents.EventsByContract = append(et.fullTxEvents.EventsByContract, newEvents)
 }
 
 func (dr *EventTracer) OnNonceChange(addr common.Address, prev, new uint64) {
@@ -225,7 +225,7 @@ func (et *EventTracer) OnLog(log *types.Log) {
 	newContractEvent.contractEvents = parseEventData(log)
 
 	// append to the transaction slice of events
-	et.fullTxEvents.eventsByContract = append(et.fullTxEvents.eventsByContract, newContractEvent)
+	et.fullTxEvents.EventsByContract = append(et.fullTxEvents.EventsByContract, newContractEvent)
 }
 
 // func (t *tracer) captureLog(address common.Address, topics []common.Hash, data []byte) {
