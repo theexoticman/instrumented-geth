@@ -76,6 +76,7 @@ type Ethereum struct {
 
 	handler *handler
 	discmix *enode.FairMix
+	dropper *dropper
 
 	// DB interfaces
 	chainDb ethdb.Database // Block chain database
@@ -148,7 +149,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 
 	// Here we determine genesis hash and active ChainConfig.
 	// We need these to figure out the consensus parameters and to set up history pruning.
-	chainConfig, genesisHash, err := core.LoadChainConfig(chainDb, config.Genesis)
+	chainConfig, _, err := core.LoadChainConfig(chainDb, config.Genesis)
 	if err != nil {
 		return nil, err
 	}
@@ -156,17 +157,6 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	// Validate history pruning configuration.
-	var historyPruningCutoff uint64
-	if config.HistoryMode == ethconfig.PostMergeHistory {
-		prunecfg, ok := ethconfig.HistoryPrunePoints[genesisHash]
-		if !ok {
-			return nil, fmt.Errorf("no history pruning point is defined for genesis %x", genesisHash)
-		}
-		historyPruningCutoff = prunecfg.BlockNumber
-	}
-
 	// Set networkID to chainID by default.
 	networkID := config.NetworkId
 	if networkID == 0 {
@@ -198,6 +188,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	}
 	log.Info("Initialising Ethereum protocol", "network", networkID, "dbversion", dbVer)
 
+	// Create BlockChain object.
 	if !config.SkipBcVersionCheck {
 		if bcVersion != nil && *bcVersion > core.BlockChainVersion {
 			return nil, fmt.Errorf("database version is v%d, Geth %s only supports v%d", *bcVersion, version.WithMeta, core.BlockChainVersion)
@@ -213,16 +204,16 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 			EnablePreimageRecording: config.EnablePreimageRecording,
 		}
 		cacheConfig = &core.CacheConfig{
-			TrieCleanLimit:       config.TrieCleanCache,
-			TrieCleanNoPrefetch:  config.NoPrefetch,
-			TrieDirtyLimit:       config.TrieDirtyCache,
-			TrieDirtyDisabled:    config.NoPruning,
-			TrieTimeLimit:        config.TrieTimeout,
-			SnapshotLimit:        config.SnapshotCache,
-			Preimages:            config.Preimages,
-			StateHistory:         config.StateHistory,
-			StateScheme:          scheme,
-			HistoryPruningCutoff: historyPruningCutoff,
+			TrieCleanLimit:      config.TrieCleanCache,
+			TrieCleanNoPrefetch: config.NoPrefetch,
+			TrieDirtyLimit:      config.TrieDirtyCache,
+			TrieDirtyDisabled:   config.NoPruning,
+			TrieTimeLimit:       config.TrieTimeout,
+			SnapshotLimit:       config.SnapshotCache,
+			Preimages:           config.Preimages,
+			StateHistory:        config.StateHistory,
+			StateScheme:         scheme,
+			ChainHistoryMode:    config.HistoryMode,
 		}
 	)
 	if config.VMTrace != "" {
@@ -248,9 +239,16 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	if err != nil {
 		return nil, err
 	}
-	fmConfig := filtermaps.Config{History: config.LogHistory, Disabled: config.LogNoHistory, ExportFileName: config.LogExportCheckpoints}
+
+	// Initialize filtermaps log index.
+	fmConfig := filtermaps.Config{
+		History:        config.LogHistory,
+		Disabled:       config.LogNoHistory,
+		ExportFileName: config.LogExportCheckpoints,
+		HashScheme:     scheme == rawdb.HashScheme,
+	}
 	chainView := eth.newChainView(eth.blockchain.CurrentBlock())
-	historyCutoff := eth.blockchain.HistoryPruningCutoff()
+	historyCutoff, _ := eth.blockchain.HistoryPruningCutoff()
 	var finalBlock uint64
 	if fb := eth.blockchain.CurrentFinalBlock(); fb != nil {
 		finalBlock = fb.Number.Uint64()
@@ -258,15 +256,16 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	eth.filterMaps = filtermaps.NewFilterMaps(chainDb, chainView, historyCutoff, finalBlock, filtermaps.DefaultParams, fmConfig)
 	eth.closeFilterMaps = make(chan chan struct{})
 
-	if config.BlobPool.Datadir != "" {
-		config.BlobPool.Datadir = stack.ResolvePath(config.BlobPool.Datadir)
-	}
-	blobPool := blobpool.New(config.BlobPool, eth.blockchain)
-
+	// TxPool
 	if config.TxPool.Journal != "" {
 		config.TxPool.Journal = stack.ResolvePath(config.TxPool.Journal)
 	}
 	legacyPool := legacypool.New(config.TxPool, eth.blockchain)
+
+	if config.BlobPool.Datadir != "" {
+		config.BlobPool.Datadir = stack.ResolvePath(config.BlobPool.Datadir)
+	}
+	blobPool := blobpool.New(config.BlobPool, eth.blockchain, legacyPool.HasPendingAuth)
 
 	eth.txPool, err = txpool.New(config.TxPool.PriceLimit, eth.blockchain, []txpool.SubPool{legacyPool, blobPool})
 	if err != nil {
@@ -282,6 +281,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		eth.localTxTracker = locals.New(config.TxPool.Journal, rejournal, eth.blockchain.Config(), eth.txPool)
 		stack.RegisterLifecycle(eth.localTxTracker)
 	}
+
 	// Permit the downloader to use the trie cache allowance during fast sync
 	cacheLimit := cacheConfig.TrieCleanLimit + cacheConfig.TrieDirtyLimit + cacheConfig.SnapshotLimit
 	if eth.handler, err = newHandler(&handlerConfig{
@@ -298,17 +298,19 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		return nil, err
 	}
 
+	eth.dropper = newDropper(eth.p2pServer.MaxDialedConns(), eth.p2pServer.MaxInboundConns())
+
 	eth.miner = miner.New(eth, config.Miner, eth.engine)
 	eth.miner.SetExtra(makeExtraData(config.Miner.ExtraData))
 	eth.miner.SetPrioAddresses(config.TxPool.Locals)
 
 	eth.APIBackend = &EthAPIBackend{
-		extRPCEnabled:       stack.Config().ExtRPCEnabled(),
-		allowUnprotectedTxs: stack.Config().AllowUnprotectedTxs,
-		eth:                 eth,
-		gpo:                 nil,
-		SimStore:            eth.simStore,
-		SimulateModeEnabled: eth.isSimulateMode,
+		extRPCEnabled:         stack.Config().ExtRPCEnabled(),
+		allowUnprotectedTxs:   stack.Config().AllowUnprotectedTxs,
+		eth:                   eth,
+		gpo:                   nil,
+		SimStore:              eth.simStore,
+		IsSimulateModeEnabled: eth.isSimulateMode,
 	}
 	if eth.APIBackend.allowUnprotectedTxs {
 		log.Info("Unprotected transactions allowed")
@@ -415,6 +417,9 @@ func (s *Ethereum) Start() error {
 	// Start the networking layer
 	s.handler.Start(s.p2pServer.MaxPeers)
 
+	// Start the connection manager
+	s.dropper.Start(s.p2pServer, func() bool { return !s.Synced() })
+
 	// start log indexer
 	s.filterMaps.Start()
 	go s.updateFilterMapsHeads()
@@ -454,7 +459,7 @@ func (s *Ethereum) updateFilterMapsHeads() {
 		if head == nil || newHead.Hash() != head.Hash() {
 			head = newHead
 			chainView := s.newChainView(head)
-			historyCutoff := s.blockchain.HistoryPruningCutoff()
+			historyCutoff, _ := s.blockchain.HistoryPruningCutoff()
 			var finalBlock uint64
 			if fb := s.blockchain.CurrentFinalBlock(); fb != nil {
 				finalBlock = fb.Number.Uint64()
@@ -516,6 +521,7 @@ func (s *Ethereum) setupDiscovery() error {
 func (s *Ethereum) Stop() error {
 	// Stop all the peer-related stuff first.
 	s.discmix.Close()
+	s.dropper.Stop()
 	s.handler.Stop()
 
 	// Then stop everything else.

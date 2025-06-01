@@ -73,6 +73,12 @@ func (s *SimulatedChainStore) GetReceipt(txHash common.Hash) (*types.Receipt, bo
 	r, ok := s.receipts[txHash]
 	return r, ok
 }
+func (s *SimulatedChainStore) GetLatestBlock() (*types.Block, bool) {
+	s.blocksMu.RLock()
+	defer s.blocksMu.RUnlock()
+	block := s.blocks[len(s.blocks)-1]
+	return block, block != nil
+}
 
 // GetBlockByNumber returns a simulated block by block number.
 func (s *SimulatedChainStore) GetBlockByNumber(num uint64) (*types.Block, bool) {

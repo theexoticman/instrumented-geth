@@ -145,8 +145,8 @@ func (api *EthereumAPI) BlobBaseFee(ctx context.Context) *hexutil.Big {
 // - highestBlock:  block number of the highest block header this node has received from peers
 // - pulledStates:  number of state entries processed until now
 // - knownStates:   number of known state entries that still need to be pulled
-func (api *EthereumAPI) Syncing() (interface{}, error) {
-	progress := api.b.SyncProgress()
+func (api *EthereumAPI) Syncing(ctx context.Context) (interface{}, error) {
+	progress := api.b.SyncProgress(ctx)
 
 	// Return not syncing if the synchronisation already completed
 	if progress.Done() {
@@ -316,8 +316,23 @@ func (api *BlockChainAPI) ChainId() *hexutil.Big {
 
 // BlockNumber returns the block number of the chain head.
 func (api *BlockChainAPI) BlockNumber() hexutil.Uint64 {
-	header, _ := api.b.HeaderByNumber(context.Background(), rpc.LatestBlockNumber) // latest header should always be available
-	return hexutil.Uint64(header.Number.Uint64())
+	if simB, ok := api.b.(interface {
+		SimChainStore() *SimulatedChainStore
+		IsSimulateMode() bool
+	}); ok && simB.IsSimulateMode() {
+		// check in the local store
+		simStore := simB.SimChainStore()
+		block, ok := simStore.GetLatestBlock()
+		if !ok {
+			log.Error("latest block is nil")
+			return 0
+		}
+		return hexutil.Uint64(block.NumberU64())
+	} else {
+		header, _ := api.b.HeaderByNumber(context.Background(), rpc.LatestBlockNumber) // latest header should always be available
+		return hexutil.Uint64(header.Number.Uint64())
+
+	}
 }
 
 // GetBalance returns the amount of wei for the given address in the state of the
@@ -515,8 +530,8 @@ func (api *BlockChainAPI) GetBlockByHash(ctx context.Context, hash common.Hash, 
 	// Simulated mode check
 	if simB, ok := api.b.(interface {
 		SimChainStore() *SimulatedChainStore
-		isSimulateMode() bool
-	}); ok && simB.isSimulateMode() {
+		IsSimulateMode() bool
+	}); ok && simB.IsSimulateMode() {
 		// NOT MANAGED BY SIMULATED CHAIN STORE
 		// use tx hash instead
 		return RPCMarshalBlock(nil, true, fullTx, api.b.ChainConfig()), nil
@@ -562,21 +577,23 @@ func (api *BlockChainAPI) GetUncleByBlockHashAndIndex(ctx context.Context, block
 }
 
 // GetUncleCountByBlockNumber returns number of uncles in the block for the given block number
-func (api *BlockChainAPI) GetUncleCountByBlockNumber(ctx context.Context, blockNr rpc.BlockNumber) *hexutil.Uint {
-	if block, _ := api.b.BlockByNumber(ctx, blockNr); block != nil {
+func (api *BlockChainAPI) GetUncleCountByBlockNumber(ctx context.Context, blockNr rpc.BlockNumber) (*hexutil.Uint, error) {
+	block, err := api.b.BlockByNumber(ctx, blockNr)
+	if block != nil {
 		n := hexutil.Uint(len(block.Uncles()))
-		return &n
+		return &n, nil
 	}
-	return nil
+	return nil, err
 }
 
 // GetUncleCountByBlockHash returns number of uncles in the block for the given block hash
-func (api *BlockChainAPI) GetUncleCountByBlockHash(ctx context.Context, blockHash common.Hash) *hexutil.Uint {
-	if block, _ := api.b.BlockByHash(ctx, blockHash); block != nil {
+func (api *BlockChainAPI) GetUncleCountByBlockHash(ctx context.Context, blockHash common.Hash) (*hexutil.Uint, error) {
+	block, err := api.b.BlockByHash(ctx, blockHash)
+	if block != nil {
 		n := hexutil.Uint(len(block.Uncles()))
-		return &n
+		return &n, nil
 	}
-	return nil
+	return nil, err
 }
 
 // GetCode returns the code stored at the given address in the state for the given block number.
@@ -609,9 +626,7 @@ func (api *BlockChainAPI) GetStorageAt(ctx context.Context, address common.Addre
 func (api *BlockChainAPI) GetBlockReceipts(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash) ([]map[string]interface{}, error) {
 	block, err := api.b.BlockByNumberOrHash(ctx, blockNrOrHash)
 	if block == nil || err != nil {
-		// When the block doesn't exist, the RPC method should return JSON null
-		// as per specification.
-		return nil, nil
+		return nil, err
 	}
 	receipts, err := api.b.GetReceipts(ctx, block.Hash())
 	if err != nil {
@@ -894,6 +909,9 @@ func StoreSimulatedArtifacts(simStore *SimulatedChainStore, results []*simBlockR
 				// assume they correspond and use the original hash.
 				h := originalTx.Hash()
 				originalHash = &h
+				fmt.Println("originalHash ", originalHash)
+				os.Stdout.Sync()
+
 			}
 			// adds block, txs, and receipts, potentially using the original hash
 			simStore.StoreBlock(res, originalHash)
@@ -1216,12 +1234,13 @@ type accessListResult struct {
 
 // CreateAccessList creates an EIP-2930 type AccessList for the given transaction.
 // Reexec and BlockNrOrHash can be specified to create the accessList on top of a certain state.
-func (api *BlockChainAPI) CreateAccessList(ctx context.Context, args TransactionArgs, blockNrOrHash *rpc.BlockNumberOrHash) (*accessListResult, error) {
+// StateOverrides can be used to create the accessList while taking into account state changes from previous transactions.
+func (api *BlockChainAPI) CreateAccessList(ctx context.Context, args TransactionArgs, blockNrOrHash *rpc.BlockNumberOrHash, stateOverrides *override.StateOverride) (*accessListResult, error) {
 	bNrOrHash := rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber)
 	if blockNrOrHash != nil {
 		bNrOrHash = *blockNrOrHash
 	}
-	acl, gasUsed, vmerr, err := AccessList(ctx, api.b, bNrOrHash, args)
+	acl, gasUsed, vmerr, err := AccessList(ctx, api.b, bNrOrHash, args, stateOverrides)
 	if err != nil {
 		return nil, err
 	}
@@ -1235,11 +1254,20 @@ func (api *BlockChainAPI) CreateAccessList(ctx context.Context, args Transaction
 // AccessList creates an access list for the given transaction.
 // If the accesslist creation fails an error is returned.
 // If the transaction itself fails, an vmErr is returned.
-func AccessList(ctx context.Context, b Backend, blockNrOrHash rpc.BlockNumberOrHash, args TransactionArgs) (acl types.AccessList, gasUsed uint64, vmErr error, err error) {
+func AccessList(ctx context.Context, b Backend, blockNrOrHash rpc.BlockNumberOrHash, args TransactionArgs, stateOverrides *override.StateOverride) (acl types.AccessList, gasUsed uint64, vmErr error, err error) {
 	// Retrieve the execution context
 	db, header, err := b.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
 	if db == nil || err != nil {
 		return nil, 0, nil, err
+	}
+
+	// Apply state overrides immediately after StateAndHeaderByNumberOrHash.
+	// If not applied here, there could be cases where user-specified overrides (e.g., nonce)
+	// may conflict with default values from the database, leading to inconsistencies.
+	if stateOverrides != nil {
+		if err := stateOverrides.Apply(db, nil); err != nil {
+			return nil, 0, nil, err
+		}
 	}
 
 	// Ensure any missing fields are filled, extract the recipient and input data
@@ -1265,10 +1293,33 @@ func AccessList(ctx context.Context, b Backend, blockNrOrHash rpc.BlockNumberOrH
 	// Retrieve the precompiles since they don't need to be added to the access list
 	precompiles := vm.ActivePrecompiles(b.ChainConfig().Rules(header.Number, isPostMerge, header.Time))
 
+	// addressesToExclude contains sender, receiver, precompiles and valid authorizations
+	addressesToExclude := map[common.Address]struct{}{args.from(): {}, to: {}}
+	for _, addr := range precompiles {
+		addressesToExclude[addr] = struct{}{}
+	}
+
+	// Prevent redundant operations if args contain more authorizations than EVM may handle
+	maxAuthorizations := uint64(*args.Gas) / params.CallNewAccountGas
+	if uint64(len(args.AuthorizationList)) > maxAuthorizations {
+		return nil, 0, nil, errors.New("insufficient gas to process all authorizations")
+	}
+
+	for _, auth := range args.AuthorizationList {
+		// Duplicating stateTransition.validateAuthorization() logic
+		if (!auth.ChainID.IsZero() && auth.ChainID.CmpBig(b.ChainConfig().ChainID) != 0) || auth.Nonce+1 < auth.Nonce {
+			continue
+		}
+
+		if authority, err := auth.Authority(); err == nil {
+			addressesToExclude[authority] = struct{}{}
+		}
+	}
+
 	// Create an initial tracer
-	prevTracer := logger.NewAccessListTracer(nil, args.from(), to, precompiles)
+	prevTracer := logger.NewAccessListTracer(nil, addressesToExclude)
 	if args.AccessList != nil {
-		prevTracer = logger.NewAccessListTracer(*args.AccessList, args.from(), to, precompiles)
+		prevTracer = logger.NewAccessListTracer(*args.AccessList, addressesToExclude)
 	}
 	for {
 		if err := ctx.Err(); err != nil {
@@ -1285,7 +1336,7 @@ func AccessList(ctx context.Context, b Backend, blockNrOrHash rpc.BlockNumberOrH
 		msg := args.ToMessage(header.BaseFee, true, true)
 
 		// Apply the transaction with the access list tracer
-		tracer := logger.NewAccessListTracer(accessList, args.from(), to, precompiles)
+		tracer := logger.NewAccessListTracer(accessList, addressesToExclude)
 		config := vm.Config{Tracer: tracer.Hooks(), NoBaseFee: true}
 		evm := b.GetEVM(ctx, statedb, header, &config, nil)
 
@@ -1324,37 +1375,41 @@ func NewTransactionAPI(b Backend, nonceLock *AddrLocker) *TransactionAPI {
 }
 
 // GetBlockTransactionCountByNumber returns the number of transactions in the block with the given block number.
-func (api *TransactionAPI) GetBlockTransactionCountByNumber(ctx context.Context, blockNr rpc.BlockNumber) *hexutil.Uint {
-	if block, _ := api.b.BlockByNumber(ctx, blockNr); block != nil {
+func (api *TransactionAPI) GetBlockTransactionCountByNumber(ctx context.Context, blockNr rpc.BlockNumber) (*hexutil.Uint, error) {
+	block, err := api.b.BlockByNumber(ctx, blockNr)
+	if block != nil {
 		n := hexutil.Uint(len(block.Transactions()))
-		return &n
+		return &n, nil
 	}
-	return nil
+	return nil, err
 }
 
 // GetBlockTransactionCountByHash returns the number of transactions in the block with the given hash.
-func (api *TransactionAPI) GetBlockTransactionCountByHash(ctx context.Context, blockHash common.Hash) *hexutil.Uint {
-	if block, _ := api.b.BlockByHash(ctx, blockHash); block != nil {
+func (api *TransactionAPI) GetBlockTransactionCountByHash(ctx context.Context, blockHash common.Hash) (*hexutil.Uint, error) {
+	block, err := api.b.BlockByHash(ctx, blockHash)
+	if block != nil {
 		n := hexutil.Uint(len(block.Transactions()))
-		return &n
+		return &n, nil
 	}
-	return nil
+	return nil, err
 }
 
 // GetTransactionByBlockNumberAndIndex returns the transaction for the given block number and index.
-func (api *TransactionAPI) GetTransactionByBlockNumberAndIndex(ctx context.Context, blockNr rpc.BlockNumber, index hexutil.Uint) *RPCTransaction {
-	if block, _ := api.b.BlockByNumber(ctx, blockNr); block != nil {
-		return newRPCTransactionFromBlockIndex(block, uint64(index), api.b.ChainConfig())
+func (api *TransactionAPI) GetTransactionByBlockNumberAndIndex(ctx context.Context, blockNr rpc.BlockNumber, index hexutil.Uint) (*RPCTransaction, error) {
+	block, err := api.b.BlockByNumber(ctx, blockNr)
+	if block != nil {
+		return newRPCTransactionFromBlockIndex(block, uint64(index), api.b.ChainConfig()), nil
 	}
-	return nil
+	return nil, err
 }
 
 // GetTransactionByBlockHashAndIndex returns the transaction for the given block hash and index.
-func (api *TransactionAPI) GetTransactionByBlockHashAndIndex(ctx context.Context, blockHash common.Hash, index hexutil.Uint) *RPCTransaction {
-	if block, _ := api.b.BlockByHash(ctx, blockHash); block != nil {
-		return newRPCTransactionFromBlockIndex(block, uint64(index), api.b.ChainConfig())
+func (api *TransactionAPI) GetTransactionByBlockHashAndIndex(ctx context.Context, blockHash common.Hash, index hexutil.Uint) (*RPCTransaction, error) {
+	block, err := api.b.BlockByHash(ctx, blockHash)
+	if block != nil {
+		return newRPCTransactionFromBlockIndex(block, uint64(index), api.b.ChainConfig()), nil
 	}
-	return nil
+	return nil, err
 }
 
 // GetRawTransactionByBlockNumberAndIndex returns the bytes of the transaction for the given block number and index.
@@ -1394,37 +1449,75 @@ func (api *TransactionAPI) GetTransactionCount(ctx context.Context, address comm
 
 // GetTransactionByHash returns the transaction for the given hash
 func (api *TransactionAPI) GetTransactionByHash(ctx context.Context, hash common.Hash) (*RPCTransaction, error) {
-	// Try to return an already finalized transaction
-	found, tx, blockHash, blockNumber, index, err := api.b.GetTransaction(ctx, hash)
-	if !found {
-		// No finalized transaction, try to retrieve it from the pool
-		if tx := api.b.GetPoolTransaction(hash); tx != nil {
-			return NewRPCPendingTransaction(tx, api.b.CurrentHeader(), api.b.ChainConfig()), nil
+	// Check simulated store first if simulate-mode is on
+	if simB, ok := api.b.(interface {
+		SimChainStore() *SimulatedChainStore
+		IsSimulateMode() bool
+	}); ok && simB.IsSimulateMode() {
+		simStore := simB.SimChainStore()
+		if simStore != nil {
+			// Try to retrieve the transaction directly from the SimChainStore
+			if tx, found := simStore.GetTransaction(hash); found {
+				// Transaction found in SimChainStore.
+				// Return it as a "pending" transaction, as its block context might
+				// still be under simulation or not yet fully determined.
+				// This mirrors how transactions from the main chain's tx pool are handled.
+				log.Debug("GetTransactionByHash: Found in SimChainStore, returning as pending", "hash", hash)
+				return NewRPCPendingTransaction(tx, api.b.CurrentHeader(), api.b.ChainConfig()), nil
+			}
+			// If not found in simStore while in simulate mode, it's considered not found for this context.
+			log.Debug("GetTransactionByHash: Not found in SimChainStore", "hash", hash)
+			return nil, nil // Indicate not found in simulate context
 		}
-		if err == nil {
-			return nil, nil
-		}
-		return nil, NewTxIndexingError()
+		// If simStore is nil but in simulate mode (should ideally not happen if configured correctly)
+		log.Warn("GetTransactionByHash: In simulate mode but SimChainStore is nil", "hash", hash)
+		return nil, fmt.Errorf("in simulate mode but SimChainStore is not available")
 	}
+
+	// --- Normal flow (not in simulate mode or fell through) ---
+
+	// Try to return an already finalized transaction from the main chain
+	found, tx, blockHash, blockNumber, index := api.b.GetTransaction(hash)
+	if !found {
+		// No finalized transaction, try to retrieve it from the regular tx pool
+		if poolTx := api.b.GetPoolTransaction(hash); poolTx != nil {
+			log.Debug("GetTransactionByHash: Found in main transaction pool", "hash", hash)
+			return NewRPCPendingTransaction(poolTx, api.b.CurrentHeader(), api.b.ChainConfig()), nil
+		}
+		// If also not in the pool there is a chance the tx indexer is still in progress.
+		if !api.b.TxIndexDone() {
+			log.Debug("GetTransactionByHash: Not found on main chain, tx indexer not done", "hash", hash)
+			return nil, NewTxIndexingError()
+		}
+		// If the transaction is not found in the pool and the indexer is done, return nil
+		log.Debug("GetTransactionByHash: Not found on main chain, tx indexer done", "hash", hash)
+		return nil, nil
+	}
+
+	// Found on the main chain (finalized)
 	header, err := api.b.HeaderByHash(ctx, blockHash)
 	if err != nil {
+		log.Error("GetTransactionByHash: Error getting header by hash for main chain tx", "hash", hash, "blockHash", blockHash, "err", err)
 		return nil, err
 	}
+	log.Debug("GetTransactionByHash: Found on main chain (finalized)", "hash", hash, "blockHash", blockHash, "blockNumber", blockNumber)
 	return newRPCTransaction(tx, blockHash, blockNumber, header.Time, index, header.BaseFee, api.b.ChainConfig()), nil
 }
 
 // GetRawTransactionByHash returns the bytes of the transaction for the given hash.
 func (api *TransactionAPI) GetRawTransactionByHash(ctx context.Context, hash common.Hash) (hexutil.Bytes, error) {
 	// Retrieve a finalized transaction, or a pooled otherwise
-	found, tx, _, _, _, err := api.b.GetTransaction(ctx, hash)
+	found, tx, _, _, _ := api.b.GetTransaction(hash)
 	if !found {
 		if tx = api.b.GetPoolTransaction(hash); tx != nil {
 			return tx.MarshalBinary()
 		}
-		if err == nil {
-			return nil, nil
+		// If also not in the pool there is a chance the tx indexer is still in progress.
+		if !api.b.TxIndexDone() {
+			return nil, NewTxIndexingError()
 		}
-		return nil, NewTxIndexingError()
+		// If the transaction is not found in the pool and the indexer is done, return nil
+		return nil, nil
 	}
 	return tx.MarshalBinary()
 }
@@ -1433,8 +1526,8 @@ func (api *TransactionAPI) GetTransactionReceipt(ctx context.Context, hash commo
 	//  Check simulated store first if simulate-mode is on
 	if simB, ok := api.b.(interface {
 		SimChainStore() *SimulatedChainStore
-		isSimulateMode() bool
-	}); ok && simB.isSimulateMode() {
+		IsSimulateMode() bool
+	}); ok && simB.IsSimulateMode() {
 		if receipt, ok := simB.SimChainStore().GetReceipt(hash); ok {
 			if tx, ok := simB.SimChainStore().GetTransaction(hash); ok {
 				signer := types.LatestSignerForChainID(tx.ChainId()) // Simplified
@@ -1443,12 +1536,16 @@ func (api *TransactionAPI) GetTransactionReceipt(ctx context.Context, hash commo
 		}
 	}
 
-	// ⛓️ Fallback to real chain
-	found, tx, blockHash, blockNumber, index, err := api.b.GetTransaction(ctx, hash)
-	if err != nil {
-		return nil, NewTxIndexingError()
-	}
+	// Fallback to real chain
+
+	found, tx, blockHash, blockNumber, index := api.b.GetTransaction(hash)
 	if !found {
+		// Make sure indexer is done.
+		if !api.b.TxIndexDone() {
+			return nil, NewTxIndexingError()
+		}
+		// No such tx.
+
 		return nil, nil
 	}
 	header, err := api.b.HeaderByHash(ctx, blockHash)
@@ -1612,9 +1709,12 @@ func (api *TransactionAPI) FillTransaction(ctx context.Context, args Transaction
 func (api *TransactionAPI) SendRawTransaction(ctx context.Context, input hexutil.Bytes) (common.Hash, error) {
 	// normal geth logic
 	tx := new(types.Transaction)
+
 	if err := tx.UnmarshalBinary(input); err != nil {
 		return common.Hash{}, err
 	}
+	fmt.Println("tx.hash() sendrawtx", tx.Hash())
+	os.Stdout.Sync()
 
 	// Simulated mode logic
 	if simB, ok := api.b.(interface {
@@ -1890,15 +1990,17 @@ func (api *DebugAPI) GetRawReceipts(ctx context.Context, blockNrOrHash rpc.Block
 // GetRawTransaction returns the bytes of the transaction for the given hash.
 func (api *DebugAPI) GetRawTransaction(ctx context.Context, hash common.Hash) (hexutil.Bytes, error) {
 	// Retrieve a finalized transaction, or a pooled otherwise
-	found, tx, _, _, _, err := api.b.GetTransaction(ctx, hash)
+	found, tx, _, _, _ := api.b.GetTransaction(hash)
 	if !found {
 		if tx = api.b.GetPoolTransaction(hash); tx != nil {
 			return tx.MarshalBinary()
 		}
-		if err == nil {
-			return nil, nil
+		// If also not in the pool there is a chance the tx indexer is still in progress.
+		if !api.b.TxIndexDone() {
+			return nil, NewTxIndexingError()
 		}
-		return nil, NewTxIndexingError()
+		// Transaction is not found in the pool and the indexer is done.
+		return nil, nil
 	}
 	return tx.MarshalBinary()
 }

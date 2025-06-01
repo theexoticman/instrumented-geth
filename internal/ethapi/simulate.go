@@ -80,11 +80,25 @@ type simBlockResult struct {
 	Block       *types.Block
 	Calls       []simCallResult
 	Receipts    []*types.Receipt
+	// senders is a map of transaction hashes to their senders.
+	senders map[common.Hash]common.Address
 }
 
 func (r *simBlockResult) MarshalJSON() ([]byte, error) {
 	blockData := RPCMarshalBlock(r.Block, true, r.fullTx, r.chainConfig)
 	blockData["calls"] = r.Calls
+	// Set tx sender if user requested full tx objects.
+	if r.fullTx {
+		if raw, ok := blockData["transactions"].([]any); ok {
+			for _, tx := range raw {
+				if tx, ok := tx.(*RPCTransaction); ok {
+					tx.From = r.senders[tx.Hash]
+				} else {
+					return nil, errors.New("simulated transaction result has invalid type")
+				}
+			}
+		}
+	}
 	return json.Marshal(blockData)
 }
 
@@ -183,7 +197,8 @@ func (sim *simulator) execute(ctx context.Context, blocks []simBlock) ([]*simBlo
 		parent  = sim.base
 	)
 	for bi, block := range blocks {
-		result, callResults, receipts, err := sim.processBlock(ctx, &block, headers[bi], parent, headers[:bi], timeout)
+		result, callResults, receipts, senders, err := sim.processBlock(ctx, &block, headers[bi], parent, headers[:bi], timeout)
+
 		if err != nil {
 			return nil, err
 		}
@@ -193,7 +208,8 @@ func (sim *simulator) execute(ctx context.Context, blocks []simBlock) ([]*simBlo
 			chainConfig: sim.chainConfig,
 			Block:       result,
 			Calls:       callResults,
-			Receipts:    receipts,
+			Receipts:    receipts, // Store receipts
+			senders:     senders,  // Store senders
 		}
 		parent = result.Header()
 
@@ -201,7 +217,7 @@ func (sim *simulator) execute(ctx context.Context, blocks []simBlock) ([]*simBlo
 	return results, nil
 }
 
-func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header, parent *types.Header, headers []*types.Header, timeout time.Duration) (*types.Block, []simCallResult, []*types.Receipt, error) {
+func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header, parent *types.Header, headers []*types.Header, timeout time.Duration) (*types.Block, []simCallResult, []*types.Receipt, map[common.Hash]common.Address, error) {
 	// Set header fields that depend only on parent block.
 	// Parent hash is needed for evm.GetHashFn to work.
 	header.ParentHash = parent.Hash()
@@ -231,20 +247,23 @@ func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header,
 	precompiles := sim.activePrecompiles(sim.base)
 	// State overrides are applied prior to execution of a block
 	if err := block.StateOverrides.Apply(sim.state, precompiles); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	var (
 		gasUsed, blobGasUsed uint64
 		txes                 = make([]*types.Transaction, len(block.Calls))
 		callResults          = make([]simCallResult, len(block.Calls))
-		receipts             = make([]*types.Receipt, len(block.Calls))
-		// Block hash will be repaired after execution.
+		receipts             = make([]*types.Receipt, len(block.Calls)) // Initialize receipts
 		// tracer   = newTracer(sim.traceTransfers, blockContext.BlockNumber.Uint64(), common.Hash{}, common.Hash{}, 0)
 		tracer   = NewEventTracer(blockContext.BlockNumber.Uint64())
 		vmConfig = &vm.Config{
 			NoBaseFee: !sim.validate,
 			Tracer:    tracer.GetHooks(),
 		}
+		// senders is a map of transaction hashes to their senders.
+		// Transaction objects contain only the signature, and we lose track
+		// of the sender when translating the arguments into a transaction object.
+		senders = make(map[common.Hash]common.Address) // Initialize senders
 	)
 	tracingStateDB := vm.StateDB(sim.state)
 	if hooks := tracer.GetHooks(); hooks != nil {
@@ -266,16 +285,17 @@ func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header,
 	var allLogs []*types.Log
 	for i, call := range block.Calls {
 		if err := ctx.Err(); err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 		if err := sim.sanitizeCall(&call, sim.state, header, blockContext, &gasUsed); err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 		var (
 			tx     = call.ToTransaction(types.DynamicFeeTxType)
 			txHash = tx.Hash()
 		)
 		txes[i] = tx
+		senders[txHash] = call.from() // Populate senders
 		tracer.reset(txHash, uint(i))
 		sim.state.SetTxContext(txHash, i)
 		// EoA check is always skipped, even in validation mode.
@@ -284,7 +304,7 @@ func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header,
 
 		if err != nil {
 			txErr := txValidationError(err)
-			return nil, nil, nil, txErr
+			return nil, nil, nil, nil, txErr
 		}
 		// Update the state with pending changes.
 		var root []byte
@@ -294,7 +314,7 @@ func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header,
 			root = sim.state.IntermediateRoot(sim.chainConfig.IsEIP158(blockContext.BlockNumber)).Bytes()
 		}
 		gasUsed += result.UsedGas
-		receipts[i] = core.MakeReceipt(evm, result, sim.state, blockContext.BlockNumber, common.Hash{}, tx, gasUsed, root)
+		receipts[i] = core.MakeReceipt(evm, result, sim.state, blockContext.BlockNumber, common.Hash{}, tx, gasUsed, root) // Populate receipts
 		blobGasUsed += receipts[i].BlobGasUsed
 		logs := tracer.Logs()
 		callRes := simCallResult{ReturnValue: result.Return(), Logs: logs, FTE: tracer.fullTxEvents, GasUsed: hexutil.Uint64(result.UsedGas)}
@@ -323,12 +343,16 @@ func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header,
 		requests = [][]byte{}
 		// EIP-6110
 		if err := core.ParseDepositLogs(&requests, allLogs, sim.chainConfig); err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 		// EIP-7002
-		core.ProcessWithdrawalQueue(&requests, evm)
+		if err := core.ProcessWithdrawalQueue(&requests, evm); err != nil {
+			return nil, nil, nil, nil, err
+		}
 		// EIP-7251
-		core.ProcessConsolidationQueue(&requests, evm)
+		if err := core.ProcessConsolidationQueue(&requests, evm); err != nil {
+			return nil, nil, nil, nil, err
+		}
 	}
 	if requests != nil {
 		reqHash := types.CalcRequestsHash(requests)
@@ -338,10 +362,10 @@ func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header,
 	chainHeadReader := &simChainHeadReader{ctx, sim.b}
 	b, err := sim.b.Engine().FinalizeAndAssemble(chainHeadReader, header, sim.state, blockBody, receipts)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	repairLogs(callResults, b.Hash())
-	return b, callResults, receipts, nil
+	return b, callResults, receipts, senders, nil
 }
 
 // repairLogs updates the block hash in the logs present in the result of
