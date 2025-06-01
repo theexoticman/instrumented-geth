@@ -1449,6 +1449,7 @@ func (api *TransactionAPI) GetTransactionCount(ctx context.Context, address comm
 
 // GetTransactionByHash returns the transaction for the given hash
 func (api *TransactionAPI) GetTransactionByHash(ctx context.Context, hash common.Hash) (*RPCTransaction, error) {
+
 	// Check simulated store first if simulate-mode is on
 	if simB, ok := api.b.(interface {
 		SimChainStore() *SimulatedChainStore
@@ -1523,6 +1524,7 @@ func (api *TransactionAPI) GetRawTransactionByHash(ctx context.Context, hash com
 }
 
 func (api *TransactionAPI) GetTransactionReceipt(ctx context.Context, hash common.Hash) (map[string]interface{}, error) {
+
 	//  Check simulated store first if simulate-mode is on
 	if simB, ok := api.b.(interface {
 		SimChainStore() *SimulatedChainStore

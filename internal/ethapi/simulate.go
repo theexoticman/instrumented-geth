@@ -79,7 +79,8 @@ type simBlockResult struct {
 	chainConfig *params.ChainConfig
 	Block       *types.Block
 	Calls       []simCallResult
-	Receipts    []*types.Receipt
+
+	Receipts []*types.Receipt
 	// senders is a map of transaction hashes to their senders.
 	senders map[common.Hash]common.Address
 }
@@ -197,12 +198,14 @@ func (sim *simulator) execute(ctx context.Context, blocks []simBlock) ([]*simBlo
 		parent  = sim.base
 	)
 	for bi, block := range blocks {
+
 		result, callResults, receipts, senders, err := sim.processBlock(ctx, &block, headers[bi], parent, headers[:bi], timeout)
 
 		if err != nil {
 			return nil, err
 		}
 		headers[bi] = result.Header()
+
 		results[bi] = &simBlockResult{
 			fullTx:      sim.fullTx,
 			chainConfig: sim.chainConfig,
@@ -211,6 +214,9 @@ func (sim *simulator) execute(ctx context.Context, blocks []simBlock) ([]*simBlo
 			Receipts:    receipts, // Store receipts
 			senders:     senders,  // Store senders
 		}
+
+		results[bi] = &simBlockResult{fullTx: sim.fullTx, chainConfig: sim.chainConfig, Block: result, Calls: callResults, senders: senders}
+
 		parent = result.Header()
 
 	}
@@ -247,6 +253,7 @@ func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header,
 	precompiles := sim.activePrecompiles(sim.base)
 	// State overrides are applied prior to execution of a block
 	if err := block.StateOverrides.Apply(sim.state, precompiles); err != nil {
+
 		return nil, nil, nil, nil, err
 	}
 	var (
@@ -263,7 +270,9 @@ func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header,
 		// senders is a map of transaction hashes to their senders.
 		// Transaction objects contain only the signature, and we lose track
 		// of the sender when translating the arguments into a transaction object.
+
 		senders = make(map[common.Hash]common.Address) // Initialize senders
+
 	)
 	tracingStateDB := vm.StateDB(sim.state)
 	if hooks := tracer.GetHooks(); hooks != nil {
@@ -285,17 +294,21 @@ func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header,
 	var allLogs []*types.Log
 	for i, call := range block.Calls {
 		if err := ctx.Err(); err != nil {
+
 			return nil, nil, nil, nil, err
 		}
 		if err := sim.sanitizeCall(&call, sim.state, header, blockContext, &gasUsed); err != nil {
 			return nil, nil, nil, nil, err
+
 		}
 		var (
 			tx     = call.ToTransaction(types.DynamicFeeTxType)
 			txHash = tx.Hash()
 		)
 		txes[i] = tx
+
 		senders[txHash] = call.from() // Populate senders
+
 		tracer.reset(txHash, uint(i))
 		sim.state.SetTxContext(txHash, i)
 		// EoA check is always skipped, even in validation mode.
@@ -304,7 +317,9 @@ func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header,
 
 		if err != nil {
 			txErr := txValidationError(err)
+
 			return nil, nil, nil, nil, txErr
+
 		}
 		// Update the state with pending changes.
 		var root []byte
@@ -343,6 +358,7 @@ func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header,
 		requests = [][]byte{}
 		// EIP-6110
 		if err := core.ParseDepositLogs(&requests, allLogs, sim.chainConfig); err != nil {
+
 			return nil, nil, nil, nil, err
 		}
 		// EIP-7002
@@ -352,6 +368,7 @@ func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header,
 		// EIP-7251
 		if err := core.ProcessConsolidationQueue(&requests, evm); err != nil {
 			return nil, nil, nil, nil, err
+
 		}
 	}
 	if requests != nil {
@@ -362,10 +379,12 @@ func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header,
 	chainHeadReader := &simChainHeadReader{ctx, sim.b}
 	b, err := sim.b.Engine().FinalizeAndAssemble(chainHeadReader, header, sim.state, blockBody, receipts)
 	if err != nil {
+
 		return nil, nil, nil, nil, err
 	}
 	repairLogs(callResults, b.Hash())
 	return b, callResults, receipts, senders, nil
+
 }
 
 // repairLogs updates the block hash in the logs present in the result of
