@@ -215,8 +215,6 @@ func (sim *simulator) execute(ctx context.Context, blocks []simBlock) ([]*simBlo
 			senders:     senders,  // Store senders
 		}
 
-		results[bi] = &simBlockResult{fullTx: sim.fullTx, chainConfig: sim.chainConfig, Block: result, Calls: callResults, senders: senders}
-
 		parent = result.Header()
 
 	}
