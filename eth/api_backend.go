@@ -41,7 +41,6 @@ import (
 	"github.com/ethereum/go-ethereum/eth/tracers"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
-	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rpc"
 )
@@ -52,7 +51,7 @@ type EthAPIBackend struct {
 	allowUnprotectedTxs   bool
 	eth                   *Ethereum
 	gpo                   *gasprice.Oracle
-	SimStore              *ethapi.SimulatedChainStore // Add this field
+	SimStore              *state.SimulatedChainStore // Add this field
 	IsSimulateModeEnabled bool
 }
 
@@ -481,14 +480,14 @@ func (b *EthAPIBackend) IsSimulateMode() bool {
 	return b.eth.IsSimulateMode() // Calls the IsSimulateMode method on the *Ethereum instance
 }
 
-func (b *EthAPIBackend) SimChainStore() *ethapi.SimulatedChainStore {
+func (b *EthAPIBackend) SimChainStore() *state.SimulatedChainStore {
 	if b.eth == nil {
 		return nil
 	}
 	return b.eth.SimChainStore() // Calls the SimChainStore method on the *Ethereum instance
 }
 
-func (b *EthAPIBackend) GetTransactionEvents(ctx context.Context, hash common.Hash) (*ethapi.FullTransactionEvents, error) {
+func (b *EthAPIBackend) GetTransactionEvents(ctx context.Context, hash common.Hash) (*state.FullTransactionEvents, error) {
 	// PoC Stub for non-simulate path
 	return nil, fmt.Errorf("GetTransactionEvents on EthAPIBackend: non-simulate mode path is a stub for PoC")
 }

@@ -1,20 +1,18 @@
 package ethapi
 
 import (
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
 	"reflect"
-	"strings"
 
 	// Needed for potential concurrent access if hooks run in parallel
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 
+	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/core/vm"
 )
 
 // --- Configuration and Context (Keep or adapt as needed) ---
@@ -45,7 +43,7 @@ type EventTracer struct {
 	logTracer    *tracer
 	ctx          *ExecutionContext
 	cfg          *EventTracerConfig
-	fullTxEvents FullTransactionEvents
+	fullTxEvents state.FullTransactionEvents
 
 	// Intermediate state needed during execution
 	currentDepth int
@@ -58,92 +56,6 @@ type EventTracer struct {
 // FullTransactionEvents <- []ContractCallEvents <- []EventData
 //
 //
-
-// FullTransactionEvents track the order of the events emitted in a transaction in a slice
-// order of events follow first in last out (FILO) order as they are appended to the slice
-type FullTransactionEvents struct {
-	EventsByContract []ContractEvents `json:"eventsByContract"`
-}
-
-// ContractEvents Track an event instance emitted by a contract within the evm
-// Every new event create a new
-type ContractEvents struct {
-	Address        common.Address `json:"address"`        // Capitalized and added JSON tag
-	ContractEvents EventData      `json:"contractEvents"` // Capitalized and added JSON tag
-}
-
-type EventData struct {
-	EventSigHash common.Hash `json:"eventSigHash"` // Kept as common.Hash
-	Parameters   [][32]byte  `json:"parameters"`   // Kept as [][32]byte
-	// TODO: add caller, as of now, not available in types.Log
-}
-
-// Custom JSON marshaling for EventData
-func (ed EventData) MarshalJSON() ([]byte, error) {
-	// Convert common.Hash to hex string
-	eventSigHashHex := ed.EventSigHash.Hex()
-
-	// Convert [][32]byte to []string (hex strings)
-	parametersHex := make([]string, len(ed.Parameters))
-	for i, param := range ed.Parameters {
-		parametersHex[i] = "0x" + hex.EncodeToString(param[:])
-	}
-
-	// Create a temporary struct for JSON marshaling
-	type eventDataJSON struct {
-		EventSigHash string   `json:"eventSigHash"`
-		Parameters   []string `json:"parameters"`
-	}
-
-	temp := eventDataJSON{
-		EventSigHash: eventSigHashHex,
-		Parameters:   parametersHex,
-	}
-
-	return json.Marshal(temp)
-}
-
-// Custom JSON unmarshaling for EventData
-func (ed *EventData) UnmarshalJSON(data []byte) error {
-	// Create a temporary struct for JSON unmarshaling
-	type eventDataJSON struct {
-		EventSigHash string   `json:"eventSigHash"`
-		Parameters   []string `json:"parameters"`
-	}
-
-	var temp eventDataJSON
-	if err := json.Unmarshal(data, &temp); err != nil {
-		return err
-	}
-
-	// Convert hex string back to common.Hash
-	ed.EventSigHash = common.HexToHash(temp.EventSigHash)
-
-	// Convert []string (hex strings) back to [][32]byte
-	ed.Parameters = make([][32]byte, len(temp.Parameters))
-	for i, paramHex := range temp.Parameters {
-		// Remove "0x" prefix if present
-		if strings.HasPrefix(paramHex, "0x") {
-			paramHex = paramHex[2:]
-		}
-
-		// Decode hex string to bytes
-		paramBytes, err := hex.DecodeString(paramHex)
-		if err != nil {
-			return fmt.Errorf("invalid hex parameter at index %d: %v", i, err)
-		}
-
-		// Ensure it's exactly 32 bytes
-		if len(paramBytes) != 32 {
-			return fmt.Errorf("parameter at index %d must be exactly 32 bytes, got %d", i, len(paramBytes))
-		}
-
-		// Copy to [32]byte
-		copy(ed.Parameters[i][:], paramBytes)
-	}
-
-	return nil
-}
 
 func NewEventTracer(blockNumber uint64) *EventTracer {
 	return &EventTracer{
@@ -163,12 +75,12 @@ func NewEventTracer(blockNumber uint64) *EventTracer {
 
 // It takes the execution context and configuration.
 // It might also need the vm.StateDB to fetch initial states if not provided otherwise.
-func NewTransactionEvents() FullTransactionEvents {
+func NewTransactionEvents() state.FullTransactionEvents {
 	// initialize transaction events tracker
-	fullTransactionEvents := FullTransactionEvents{}
+	fullTransactionEvents := state.FullTransactionEvents{}
 
 	// intiialize the slice of events
-	fullTransactionEvents.EventsByContract = make([]ContractEvents, 0)
+	fullTransactionEvents.EventsByContract = make([]state.ContractEvents, 0)
 	return fullTransactionEvents
 
 }
@@ -179,7 +91,7 @@ func (et *EventTracer) reset(txHash common.Hash, txIdx uint) {
 	et.logTracer.reset(txHash, txIdx)
 }
 
-// GetHooks returns a populated tracing.Hooks struct pointing to the EventTracer's methods.
+// GetHooks returns a populated Hooks struct pointing to the EventTracer's methods.
 func (dr *EventTracer) GetHooks() *tracing.Hooks {
 	return &tracing.Hooks{
 		// VM events
@@ -196,7 +108,7 @@ func (dr *EventTracer) GetHooks() *tracing.Hooks {
 func (dr *EventTracer) GetResult() (*DiffTracerResult, error) {
 
 	// TODO: Handle event capture if needed
-	eventsCopy := make(map[common.Address]*[]EventData)
+	eventsCopy := make(map[common.Address]*[]state.EventData)
 	// Populate eventsCopy if events are captured
 
 	return &DiffTracerResult{
@@ -257,13 +169,13 @@ func (et *EventTracer) OnBalanceChangeHook(addr common.Address, prev, new *big.I
 	paramsForEvent = append(paramsForEvent, prevBytes)
 	paramsForEvent = append(paramsForEvent, newBytes)
 
-	balanceEvent := EventData{
+	balanceEvent := state.EventData{
 		EventSigHash: tracing.GetBalanceChangeReasonHash(reason), // Use predefined hash
 		Parameters:   paramsForEvent,
 		// TODO: make Caller available and include
 
 	}
-	newEvents := ContractEvents{
+	newEvents := state.ContractEvents{
 		Address:        addr,
 		ContractEvents: balanceEvent,
 	}
@@ -295,7 +207,7 @@ func (et *EventTracer) OnLog(log *types.Log) {
 	et.logTracer.captureLog(log.Address, log.Topics, log.Data)
 
 	// create a new custom event instance
-	newContractEvent := ContractEvents{}
+	newContractEvent := state.ContractEvents{}
 	newContractEvent.Address = log.Address
 	newContractEvent.ContractEvents = parseEventData(log)
 
@@ -412,40 +324,40 @@ const (
 	memoryPadLimit = 1024 * 1024
 )
 
-func GetMemoryCopyPadded(m *vm.Memory, offset, size uint64) ([]byte, error) {
-	// Implementation remains the same
-	if size == 0 {
-		return []byte{}, nil
-	}
-	if int(offset+size) < m.Len() { // slice fully inside memory
-		return m.GetCopy(offset, size), nil
-	}
-	// Check for potential overflow before calculating paddingNeeded
-	if offset+size < offset { // Overflow occurred
-		return nil, fmt.Errorf("memory offset/size overflow: offset=%d, size=%d", offset, size)
-	}
-	paddingNeeded := int(offset+size) - m.Len()
-	if paddingNeeded > memoryPadLimit {
-		return nil, fmt.Errorf("reached limit for padding memory slice: %d", paddingNeeded)
-	}
-	cpy := make([]byte, size)
-	// Check for overflow before calculating overlap
-	memLenU64 := uint64(m.Len())
-	if offset >= memLenU64 { // Offset is beyond memory length, all padding
-		return cpy, nil // Return zero-filled slice
-	}
-	overlap := memLenU64 - offset
-	if overlap > size { // Should not happen if initial check passed, but good practice
-		overlap = size
-	}
-	copy(cpy, m.GetPtr(offset, overlap))
-	return cpy, nil
-}
+// func GetMemoryCopyPadded(m *Memory, offset, size uint64) ([]byte, error) {
+// 	// Implementation remains the same
+// 	if size == 0 {
+// 		return []byte{}, nil
+// 	}
+// 	if int(offset+size) < m.Len() { // slice fully inside memory
+// 		return m.GetCopy(offset, size), nil
+// 	}
+// 	// Check for potential overflow before calculating paddingNeeded
+// 	if offset+size < offset { // Overflow occurred
+// 		return nil, fmt.Errorf("memory offset/size overflow: offset=%d, size=%d", offset, size)
+// 	}
+// 	paddingNeeded := int(offset+size) - m.Len()
+// 	if paddingNeeded > memoryPadLimit {
+// 		return nil, fmt.Errorf("reached limit for padding memory slice: %d", paddingNeeded)
+// 	}
+// 	cpy := make([]byte, size)
+// 	// Check for overflow before calculating overlap
+// 	memLenU64 := uint64(m.Len())
+// 	if offset >= memLenU64 { // Offset is beyond memory length, all padding
+// 		return cpy, nil // Return zero-filled slice
+// 	}
+// 	overlap := memLenU64 - offset
+// 	if overlap > size { // Should not happen if initial check passed, but good practice
+// 		overlap = size
+// 	}
+// 	copy(cpy, m.GetPtr(offset, overlap))
+// 	return cpy, nil
+// }
 
 // --- Data Structures (Keep as is or adapt) ---
 
 type DiffTracerResult struct {
-	Events map[common.Address]*[]EventData `json:"events,omitempty"` // Keep if event capture is implemented
+	Events map[common.Address]*[]state.EventData `json:"events,omitempty"` // Keep if event capture is implemented
 }
 
 type TracerAccount struct {
@@ -611,9 +523,9 @@ func areTracerAccountsEqual(a, b *TracerAccount) bool {
 // }
 
 // parseEventData converts a types.Log into the EventData struct.
-func parseEventData(log *types.Log) EventData {
+func parseEventData(log *types.Log) state.EventData {
 	// initialize a new ContractEvent data structure
-	event := EventData{}
+	event := state.EventData{}
 
 	if len(log.Topics) > 0 {
 		event.EventSigHash = log.Topics[0] // Assign common.Hash directly

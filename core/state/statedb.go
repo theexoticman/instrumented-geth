@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -156,6 +157,8 @@ type StateDB struct {
 	StorageLoaded  int          // Number of storage slots retrieved from the database during the state transition
 	StorageUpdated atomic.Int64 // Number of storage slots updated during the state transition
 	StorageDeleted atomic.Int64 // Number of storage slots deleted during the state transition
+
+	SimStore *SimulatedChainStore // Pointer to the simulation store, nil if not in simulation mode
 }
 
 // New creates a new state from a given trie.
@@ -295,27 +298,58 @@ func (s *StateDB) SubRefund(gas uint64) {
 // Exist reports whether the given account address exists in the state.
 // Notably this also returns true for self-destructed accounts.
 func (s *StateDB) Exist(addr common.Address) bool {
-	return s.getStateObject(addr) != nil
+	if s.SimStore != nil {
+		if simAcct := s.SimStore.GetAccount(addr); simAcct != nil {
+			return true // Exists in simulation
+		}
+	}
+	return s.getStateObject(addr) != nil // Exists in base state
 }
 
 // Empty returns whether the state object is either non-existent
 // or empty according to the EIP161 specification (balance = nonce = code = 0)
 func (s *StateDB) Empty(addr common.Address) bool {
+	if s.SimStore != nil {
+		if simAcct := s.SimStore.GetAccount(addr); simAcct != nil {
+			// Define emptiness based on SimulatedAccount fields
+			isBalanceZero := simAcct.Balance == nil || simAcct.Balance.IsZero()
+			isCodeEmpty := len(simAcct.Code) == 0
+			// Nonce is uint64, 0 is its zero value.
+			return isBalanceZero && simAcct.Nonce == 0 && isCodeEmpty
+		}
+		// If not in simStore, fall through to check base state.
+	}
 	so := s.getStateObject(addr)
 	return so == nil || so.empty()
 }
 
 // GetBalance retrieves the balance from the given address or 0 if object not found
 func (s *StateDB) GetBalance(addr common.Address) *uint256.Int {
+	if s.SimStore != nil {
+		if simAcct := s.SimStore.GetAccount(addr); simAcct != nil && simAcct.Balance == nil {
+			return simAcct.Balance
+		}
+		// If the account is NOT in simStore, we fall through to check the base state.
+		// This means the simulation hasn't specified an overriding state for this account's balance.
+	}
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		return stateObject.Balance()
 	}
-	return common.U2560
+	return common.U2560 // common.U2560 is a common way to represent zero balance
 }
 
 // GetNonce retrieves the nonce from the given address or 0 if object not found
 func (s *StateDB) GetNonce(addr common.Address) uint64 {
+	if s.SimStore != nil {
+		// fmt.Println("GetNonce")
+		// fmt.Println("accounts in store", len(s.SimStore.accounts))
+		// fmt.Println("account address", addr.Hex())
+		// fmt.Println("account nonce", s.SimStore.GetAccount(addr))
+		if simAcct := s.SimStore.GetAccount(addr); simAcct != nil && simAcct.Nonce != 0 {
+			return simAcct.Nonce
+		}
+	}
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		return stateObject.Nonce()
@@ -340,6 +374,11 @@ func (s *StateDB) TxIndex() int {
 }
 
 func (s *StateDB) GetCode(addr common.Address) []byte {
+	if s.SimStore != nil {
+		if simAcct := s.SimStore.GetAccount(addr); simAcct != nil && len(simAcct.Code) != 0 {
+			return simAcct.Code
+		}
+	}
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		if s.witness != nil {
@@ -351,6 +390,11 @@ func (s *StateDB) GetCode(addr common.Address) []byte {
 }
 
 func (s *StateDB) GetCodeSize(addr common.Address) int {
+	if s.SimStore != nil {
+		if simAcct := s.SimStore.GetAccount(addr); simAcct != nil && len(simAcct.Code) > 0 {
+			return len(simAcct.Code)
+		}
+	}
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		if s.witness != nil {
@@ -362,6 +406,11 @@ func (s *StateDB) GetCodeSize(addr common.Address) int {
 }
 
 func (s *StateDB) GetCodeHash(addr common.Address) common.Hash {
+	if s.SimStore != nil {
+		if simAcct := s.SimStore.GetAccount(addr); simAcct != nil && len(simAcct.CodeHash) > 0 {
+			return common.BytesToHash(simAcct.CodeHash)
+		}
+	}
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		return common.BytesToHash(stateObject.CodeHash())
@@ -371,6 +420,18 @@ func (s *StateDB) GetCodeHash(addr common.Address) common.Hash {
 
 // GetState retrieves the value associated with the specific key.
 func (s *StateDB) GetState(addr common.Address, hash common.Hash) common.Hash {
+	if s.SimStore != nil {
+		if simAcct := s.SimStore.GetAccount(addr); simAcct != nil {
+			if value, exists := simAcct.Storage[hash]; exists {
+				fmt.Println("GetState")
+				fmt.Println("addr", addr.Hex())
+				fmt.Println("hash", hash.Hex())
+				fmt.Println("value", value.Hex())
+				os.Stdout.Sync()
+				return value
+			}
+		}
+	}
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		return stateObject.GetState(hash)
@@ -381,6 +442,13 @@ func (s *StateDB) GetState(addr common.Address, hash common.Hash) common.Hash {
 // GetCommittedState retrieves the value associated with the specific key
 // without any mutations caused in the current execution.
 func (s *StateDB) GetCommittedState(addr common.Address, hash common.Hash) common.Hash {
+	if s.SimStore != nil {
+		if simAcct := s.SimStore.GetAccount(addr); simAcct != nil {
+			if value, exists := simAcct.Storage[hash]; exists {
+				return value
+			}
+		}
+	}
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		return stateObject.GetCommittedState(hash)
@@ -409,32 +477,57 @@ func (s *StateDB) HasSelfDestructed(addr common.Address) bool {
 func (s *StateDB) AddBalance(addr common.Address, amount *uint256.Int, reason tracing.BalanceChangeReason) uint256.Int {
 	stateObject := s.getOrNewStateObject(addr)
 	if stateObject == nil {
+		// object not found, add to simStore
+		if s.SimStore != nil {
+			s.SimStore.AddAccountBalance(addr, amount)
+		}
 		return uint256.Int{}
 	}
-	return stateObject.AddBalance(amount)
+	newAmount := new(uint256.Int).Add(stateObject.Balance(), amount)
+	if s.SimStore != nil {
+		s.SimStore.AddAccountBalance(addr, newAmount)
+	}
+	return stateObject.SetBalance(newAmount)
 }
 
 // SubBalance subtracts amount from the account associated with addr.
 func (s *StateDB) SubBalance(addr common.Address, amount *uint256.Int, reason tracing.BalanceChangeReason) uint256.Int {
 	stateObject := s.getOrNewStateObject(addr)
 	if stateObject == nil {
+		if s.SimStore != nil {
+			s.SimStore.SubAccountBalance(addr, amount)
+		}
 		return uint256.Int{}
 	}
+
 	if amount.IsZero() {
+		if s.SimStore != nil {
+			return *s.SimStore.GetAccount(addr).Balance
+		}
 		return *(stateObject.Balance())
 	}
-	return stateObject.SetBalance(new(uint256.Int).Sub(stateObject.Balance(), amount))
+	newAmount := new(uint256.Int).Sub(stateObject.Balance(), amount)
+	if s.SimStore != nil {
+		s.SimStore.SetAccountBalance(addr, newAmount)
+	}
+	return stateObject.SetBalance(newAmount)
 }
 
 func (s *StateDB) SetBalance(addr common.Address, amount *uint256.Int, reason tracing.BalanceChangeReason) {
 	stateObject := s.getOrNewStateObject(addr)
 	if stateObject != nil {
+		if s.SimStore != nil {
+			s.SimStore.SetAccountBalance(addr, amount)
+		}
 		stateObject.SetBalance(amount)
 	}
 }
 
 func (s *StateDB) SetNonce(addr common.Address, nonce uint64, reason tracing.NonceChangeReason) {
 	stateObject := s.getOrNewStateObject(addr)
+	if s.SimStore != nil {
+		s.SimStore.UpdateAccountNonce(addr, nonce)
+	}
 	if stateObject != nil {
 		stateObject.SetNonce(nonce)
 	}
@@ -442,6 +535,9 @@ func (s *StateDB) SetNonce(addr common.Address, nonce uint64, reason tracing.Non
 
 func (s *StateDB) SetCode(addr common.Address, code []byte) (prev []byte) {
 	stateObject := s.getOrNewStateObject(addr)
+	if s.SimStore != nil {
+		s.SimStore.UpdateAccountCode(addr, code)
+	}
 	if stateObject != nil {
 		return stateObject.SetCode(crypto.Keccak256Hash(code), code)
 	}
@@ -449,7 +545,16 @@ func (s *StateDB) SetCode(addr common.Address, code []byte) (prev []byte) {
 }
 
 func (s *StateDB) SetState(addr common.Address, key, value common.Hash) common.Hash {
+	fmt.Println("SetState")
+	fmt.Println("addr", addr.Hex())
+	fmt.Println("key", key.Hex())
+	fmt.Println("value", value.Hex())
+	os.Stdout.Sync()
 	if stateObject := s.getOrNewStateObject(addr); stateObject != nil {
+		if s.SimStore != nil { // If simulation is active
+			// You'd need a method in SimStore to update/create an account and set its storage
+			s.SimStore.UpdateAccountStorage(addr, key, value)
+		}
 		return stateObject.SetState(key, value)
 	}
 	return common.Hash{}
@@ -466,6 +571,9 @@ func (s *StateDB) SetStorage(addr common.Address, storage map[common.Hash]common
 	//
 	// TODO (rjl493456442): This function should only be supported by 'unwritable'
 	// state, and all mutations made should be discarded afterward.
+	if s.SimStore != nil {
+		s.SimStore.SetStorage(addr, storage)
+	}
 	obj := s.getStateObject(addr)
 	if obj != nil {
 		if _, ok := s.stateObjectsDestruct[addr]; !ok {
@@ -562,11 +670,15 @@ func (s *StateDB) updateStateObject(obj *stateObject) {
 
 // deleteStateObject removes the given object from the state trie.
 func (s *StateDB) deleteStateObject(addr common.Address) {
+	if s.SimStore != nil {
+		s.SimStore.DeleteAccount(addr)
+	}
 	if err := s.trie.DeleteAccount(addr); err != nil {
 		s.setError(fmt.Errorf("deleteStateObject (%x) error: %v", addr[:], err))
 	}
 }
 func (s *StateDB) GetStateObject(addr common.Address) *stateObject {
+
 	return s.getStateObject(addr)
 }
 
@@ -644,6 +756,9 @@ func (s *StateDB) CreateAccount(addr common.Address) {
 // correctly handle EIP-6780 'delete-in-same-transaction' logic.
 func (s *StateDB) CreateContract(addr common.Address) {
 	obj := s.getStateObject(addr)
+	if obj == nil {
+		obj = s.createObject(addr)
+	}
 	if !obj.newContract {
 		obj.newContract = true
 		s.journal.createContract(addr)
@@ -670,6 +785,9 @@ func (s *StateDB) Copy() *StateDB {
 		logs:                 make(map[common.Hash][]*types.Log, len(s.logs)),
 		logSize:              s.logSize,
 		preimages:            maps.Clone(s.preimages),
+
+		// Copy the SimStore field
+		SimStore: s.SimStore,
 
 		// Do we need to copy the access list and transient storage?
 		// In practice: No. At the start of a transaction, these two lists are empty.
@@ -1497,4 +1615,8 @@ func (s *StateDB) Dirties() map[common.Address]struct{} {
 		dirties[addr] = struct{}{}
 	}
 	return dirties
+}
+
+func (s *StateDB) SetSimulatedStore(store *SimulatedChainStore) {
+	s.SimStore = store
 }

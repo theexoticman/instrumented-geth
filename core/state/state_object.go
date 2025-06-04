@@ -475,6 +475,7 @@ func (s *stateObject) SetBalance(amount *uint256.Int) uint256.Int {
 }
 
 func (s *stateObject) setBalance(amount *uint256.Int) {
+
 	s.data.Balance = amount
 }
 

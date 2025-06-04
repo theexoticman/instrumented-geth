@@ -357,7 +357,14 @@ func (bc *BlockChain) State() (*state.StateDB, error) {
 
 // StateAt returns a new mutable state based on a particular point in time.
 func (bc *BlockChain) StateAt(root common.Hash) (*state.StateDB, error) {
-	return state.New(root, bc.statedb)
+	sdb, err := state.New(root, bc.statedb) // bc.statedb is the CachingDB
+	if err != nil {
+		return nil, err
+	}
+	if bc.simulatedStore != nil { // Check if the BlockChain has a sim store
+		sdb.SetSimulatedStore(bc.simulatedStore) // Configure this specific StateDB instance
+	}
+	return sdb, nil
 }
 
 // Config retrieves the chain's fork configuration.

@@ -434,18 +434,24 @@ func newTestAccountManager(t *testing.T) (*accounts.Manager, accounts.Account) {
 }
 
 type testBackend struct {
-	db      ethdb.Database
-	chain   *core.BlockChain
-	pending *types.Block
-	accman  *accounts.Manager
-	acc     accounts.Account
+	db       ethdb.Database
+	chain    *core.BlockChain
+	pending  *types.Block
+	accman   *accounts.Manager
+	acc      accounts.Account
+	simStore *state.SimulatedChainStore
 }
 
 // Add this method to implement the Backend interface
-func (b *testBackend) GetTransactionEvents(ctx context.Context, hash common.Hash) (*FullTransactionEvents, error) {
+func (b *testBackend) GetTransactionEvents(ctx context.Context, hash common.Hash) (*state.FullTransactionEvents, error) {
 	// Implement the logic to retrieve transaction events here
 	// For now, return nil or a mock implementation for testing
 	return nil, nil
+}
+
+// Add this method to implement the Backend interface
+func (b *testBackend) IsSimulateMode() bool {
+	return b.simStore != nil
 }
 
 func newTestBackend(t *testing.T, n int, gspec *core.Genesis, engine consensus.Engine, generator func(i int, b *core.BlockGen)) *testBackend {
@@ -471,7 +477,7 @@ func newTestBackend(t *testing.T, n int, gspec *core.Genesis, engine consensus.E
 		t.Fatalf("block %d: failed to insert into chain: %v", n, err)
 	}
 
-	backend := &testBackend{db: db, chain: chain, accman: accman, acc: acc}
+	backend := &testBackend{db: db, chain: chain, accman: accman, acc: acc, simStore: state.NewSimulatedChainStore()}
 	return backend
 }
 

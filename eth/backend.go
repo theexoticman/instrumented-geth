@@ -32,6 +32,7 @@ import (
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/filtermaps"
 	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/state/pruner"
 	"github.com/ethereum/go-ethereum/core/txpool"
 	"github.com/ethereum/go-ethereum/core/txpool/blobpool"
@@ -104,7 +105,7 @@ type Ethereum struct {
 
 	// simulate mode
 	isSimulateMode bool
-	simStore       *ethapi.SimulatedChainStore
+	simStore       *state.SimulatedChainStore
 }
 
 // New creates a new Ethereum object (including the initialisation of the common Ethereum object),
@@ -179,7 +180,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	}
 	// Advanced Simulate mode
 	if config.SimulateMode {
-		eth.simStore = ethapi.NewSimulatedChainStore()
+		eth.simStore = state.NewSimulatedChainStore()
 	}
 	bcVersion := rawdb.ReadDatabaseVersion(chainDb)
 	var dbVer = "<nil>"
@@ -235,7 +236,17 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	if config.OverrideVerkle != nil {
 		overrides.OverrideVerkle = config.OverrideVerkle
 	}
-	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, config.Genesis, &overrides, eth.engine, vmConfig, &config.TransactionHistory)
+	if config.SimulateMode {
+		// set the local store in the backend
+		eth.simStore = state.NewSimulatedChainStore() // Initialize the simStore for the Ethereum service
+
+	}
+
+	if eth.isSimulateMode {
+		eth.blockchain, err = core.NewBlockChainWithSimulatedStore(chainDb, cacheConfig, config.Genesis, &overrides, eth.engine, vmConfig, &config.TransactionHistory, eth.simStore)
+	} else {
+		eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, config.Genesis, &overrides, eth.engine, vmConfig, &config.TransactionHistory)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -578,6 +589,6 @@ func (s *Ethereum) IsSimulateMode() bool {
 	return s.isSimulateMode
 }
 
-func (e *Ethereum) SimChainStore() *ethapi.SimulatedChainStore {
+func (e *Ethereum) SimChainStore() *state.SimulatedChainStore {
 	return e.simStore
 }

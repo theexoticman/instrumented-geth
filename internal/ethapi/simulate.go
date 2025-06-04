@@ -54,31 +54,12 @@ type simBlock struct {
 	Calls          []TransactionArgs
 }
 
-// simCallResult is the result of a simulated call.
-type simCallResult struct {
-	ReturnValue hexutil.Bytes         `json:"returnData"`
-	Logs        []*types.Log          `json:"logs"`
-	FTE         FullTransactionEvents `json:"fullTransactionEvents"`
-	GasUsed     hexutil.Uint64        `json:"gasUsed"`
-	Status      hexutil.Uint64        `json:"status"`
-	Error       *callError            `json:"error,omitempty"`
-}
-
-func (r *simCallResult) MarshalJSON() ([]byte, error) {
-	type callResultAlias simCallResult
-	// Marshal logs to be an empty array instead of nil when empty
-	if r.Logs == nil {
-		r.Logs = []*types.Log{}
-	}
-	return json.Marshal((*callResultAlias)(r))
-}
-
 // simBlockResult is the result of a simulated block.
 type simBlockResult struct {
 	fullTx      bool
 	chainConfig *params.ChainConfig
 	Block       *types.Block
-	Calls       []simCallResult
+	Calls       []state.SimCallResult
 
 	Receipts []*types.Receipt
 	// senders is a map of transaction hashes to their senders.
@@ -166,7 +147,7 @@ type simulator struct {
 }
 
 // execute runs the simulation of a series of blocks.
-func (sim *simulator) execute(ctx context.Context, blocks []simBlock) ([]*simBlockResult, error) {
+func (sim *simulator) execute(ctx context.Context, blocks []simBlock) ([]*state.SimBlockResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -194,7 +175,7 @@ func (sim *simulator) execute(ctx context.Context, blocks []simBlock) ([]*simBlo
 		return nil, err
 	}
 	var (
-		results = make([]*simBlockResult, len(blocks))
+		results = make([]*state.SimBlockResult, len(blocks))
 		parent  = sim.base
 	)
 	for bi, block := range blocks {
@@ -206,13 +187,13 @@ func (sim *simulator) execute(ctx context.Context, blocks []simBlock) ([]*simBlo
 		}
 		headers[bi] = result.Header()
 
-		results[bi] = &simBlockResult{
-			fullTx:      sim.fullTx,
-			chainConfig: sim.chainConfig,
+		results[bi] = &state.SimBlockResult{
+			FullTx:      sim.fullTx,
+			ChainConfig: sim.chainConfig,
 			Block:       result,
 			Calls:       callResults,
 			Receipts:    receipts, // Store receipts
-			senders:     senders,  // Store senders
+			Senders:     senders,  // Store senders
 		}
 
 		parent = result.Header()
@@ -221,7 +202,7 @@ func (sim *simulator) execute(ctx context.Context, blocks []simBlock) ([]*simBlo
 	return results, nil
 }
 
-func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header, parent *types.Header, headers []*types.Header, timeout time.Duration) (*types.Block, []simCallResult, []*types.Receipt, map[common.Hash]common.Address, error) {
+func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header, parent *types.Header, headers []*types.Header, timeout time.Duration) (*types.Block, []state.SimCallResult, []*types.Receipt, map[common.Hash]common.Address, error) {
 	// Set header fields that depend only on parent block.
 	// Parent hash is needed for evm.GetHashFn to work.
 	header.ParentHash = parent.Hash()
@@ -257,7 +238,7 @@ func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header,
 	var (
 		gasUsed, blobGasUsed uint64
 		txes                 = make([]*types.Transaction, len(block.Calls))
-		callResults          = make([]simCallResult, len(block.Calls))
+		callResults          = make([]state.SimCallResult, len(block.Calls))
 		receipts             = make([]*types.Receipt, len(block.Calls)) // Initialize receipts
 		// tracer   = newTracer(sim.traceTransfers, blockContext.BlockNumber.Uint64(), common.Hash{}, common.Hash{}, 0)
 		tracer   = NewEventTracer(blockContext.BlockNumber.Uint64())
@@ -330,15 +311,15 @@ func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header,
 		receipts[i] = core.MakeReceipt(evm, result, sim.state, blockContext.BlockNumber, common.Hash{}, tx, gasUsed, root) // Populate receipts
 		blobGasUsed += receipts[i].BlobGasUsed
 		logs := tracer.Logs()
-		callRes := simCallResult{ReturnValue: result.Return(), Logs: logs, FTE: tracer.fullTxEvents, GasUsed: hexutil.Uint64(result.UsedGas)}
+		callRes := state.SimCallResult{ReturnValue: result.Return(), Logs: logs, FTE: tracer.fullTxEvents, GasUsed: hexutil.Uint64(result.UsedGas)}
 		if result.Failed() {
 			callRes.Status = hexutil.Uint64(types.ReceiptStatusFailed)
 			if errors.Is(result.Err, vm.ErrExecutionReverted) {
 				// If the result contains a revert reason, try to unpack it.
 				revertErr := newRevertError(result.Revert())
-				callRes.Error = &callError{Message: revertErr.Error(), Code: errCodeReverted, Data: revertErr.ErrorData().(string)}
+				callRes.Error = &state.CallError{Message: revertErr.Error(), Code: errCodeReverted, Data: revertErr.ErrorData().(string)}
 			} else {
-				callRes.Error = &callError{Message: result.Err.Error(), Code: errCodeVMError}
+				callRes.Error = &state.CallError{Message: result.Err.Error(), Code: errCodeVMError}
 			}
 		} else {
 			callRes.Status = hexutil.Uint64(types.ReceiptStatusSuccessful)
@@ -388,7 +369,7 @@ func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header,
 // repairLogs updates the block hash in the logs present in the result of
 // a simulated block. This is needed as during execution when logs are collected
 // the block hash is not known.
-func repairLogs(calls []simCallResult, hash common.Hash) {
+func repairLogs(calls []state.SimCallResult, hash common.Hash) {
 	for i := range calls {
 		for j := range calls[i].Logs {
 			calls[i].Logs[j].BlockHash = hash
@@ -562,26 +543,6 @@ func (b *simBackend) HeaderByNumber(ctx context.Context, number rpc.BlockNumber)
 
 func (b *simBackend) ChainConfig() *params.ChainConfig {
 	return b.b.ChainConfig()
-}
-
-/**
-*
-* Used only in the simulate mode with local mining.
-*
-*
- */
-func (call simCallResult) ToReceipt(tx *types.Transaction, blockHash common.Hash, blockNumber uint64) *types.Receipt {
-	return &types.Receipt{
-		Type:              tx.Type(),
-		CumulativeGasUsed: uint64(call.GasUsed),
-		Logs:              call.Logs,
-		TxHash:            tx.Hash(),
-		ContractAddress:   common.Address{}, // or actual if contract creation
-		GasUsed:           uint64(call.GasUsed),
-		BlockHash:         blockHash,
-		BlockNumber:       big.NewInt(int64(blockNumber)),
-		Status:            uint64(call.Status),
-	}
 }
 
 // IPSP Creation

@@ -282,6 +282,8 @@ type BlockChain struct {
 	logger     *tracing.Hooks
 
 	lastForkReadyAlert time.Time // Last time there was a fork readiness print out
+
+	simulatedStore *state.SimulatedChainStore
 }
 
 // NewBlockChain returns a fully initialised block chain using information
@@ -330,6 +332,217 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, genesis *Genesis
 		engine:        engine,
 		vmConfig:      vmConfig,
 		logger:        vmConfig.Tracer,
+	}
+	bc.hc, err = NewHeaderChain(db, chainConfig, engine, bc.insertStopped)
+	if err != nil {
+		return nil, err
+	}
+	bc.flushInterval.Store(int64(cacheConfig.TrieTimeLimit))
+	bc.statedb = state.NewDatabase(bc.triedb, nil)
+	bc.validator = NewBlockValidator(chainConfig, bc)
+	bc.prefetcher = newStatePrefetcher(chainConfig, bc.hc)
+	bc.processor = NewStateProcessor(chainConfig, bc.hc)
+
+	genesisHeader := bc.GetHeaderByNumber(0)
+	if genesisHeader == nil {
+		return nil, ErrNoGenesis
+	}
+	bc.genesisBlock = types.NewBlockWithHeader(genesisHeader)
+
+	bc.currentBlock.Store(nil)
+	bc.currentSnapBlock.Store(nil)
+	bc.currentFinalBlock.Store(nil)
+	bc.currentSafeBlock.Store(nil)
+
+	// Update chain info data metrics
+	chainInfoGauge.Update(metrics.GaugeInfoValue{"chain_id": bc.chainConfig.ChainID.String()})
+
+	// If Geth is initialized with an external ancient store, re-initialize the
+	// missing chain indexes and chain flags. This procedure can survive crash
+	// and can be resumed in next restart since chain flags are updated in last step.
+	if bc.empty() {
+		rawdb.InitDatabaseFromFreezer(bc.db)
+	}
+	// Load blockchain states from disk
+	if err := bc.loadLastState(); err != nil {
+		return nil, err
+	}
+	// Make sure the state associated with the block is available, or log out
+	// if there is no available state, waiting for state sync.
+	head := bc.CurrentBlock()
+	if !bc.HasState(head.Root) {
+		if head.Number.Uint64() == 0 {
+			// The genesis state is missing, which is only possible in the path-based
+			// scheme. This situation occurs when the initial state sync is not finished
+			// yet, or the chain head is rewound below the pivot point. In both scenarios,
+			// there is no possible recovery approach except for rerunning a snap sync.
+			// Do nothing here until the state syncer picks it up.
+			log.Info("Genesis state is missing, wait state sync")
+		} else {
+			// Head state is missing, before the state recovery, find out the
+			// disk layer point of snapshot(if it's enabled). Make sure the
+			// rewound point is lower than disk layer.
+			var diskRoot common.Hash
+			if bc.cacheConfig.SnapshotLimit > 0 {
+				diskRoot = rawdb.ReadSnapshotRoot(bc.db)
+			}
+			if diskRoot != (common.Hash{}) {
+				log.Warn("Head state missing, repairing", "number", head.Number, "hash", head.Hash(), "snaproot", diskRoot)
+
+				snapDisk, err := bc.setHeadBeyondRoot(head.Number.Uint64(), 0, diskRoot, true)
+				if err != nil {
+					return nil, err
+				}
+				// Chain rewound, persist old snapshot number to indicate recovery procedure
+				if snapDisk != 0 {
+					rawdb.WriteSnapshotRecoveryNumber(bc.db, snapDisk)
+				}
+			} else {
+				log.Warn("Head state missing, repairing", "number", head.Number, "hash", head.Hash())
+				if _, err := bc.setHeadBeyondRoot(head.Number.Uint64(), 0, common.Hash{}, true); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	// Ensure that a previous crash in SetHead doesn't leave extra ancients
+	if frozen, err := bc.db.Ancients(); err == nil && frozen > 0 {
+		var (
+			needRewind bool
+			low        uint64
+		)
+		// The head full block may be rolled back to a very low height due to
+		// blockchain repair. If the head full block is even lower than the ancient
+		// chain, truncate the ancient store.
+		fullBlock := bc.CurrentBlock()
+		if fullBlock != nil && fullBlock.Hash() != bc.genesisBlock.Hash() && fullBlock.Number.Uint64() < frozen-1 {
+			needRewind = true
+			low = fullBlock.Number.Uint64()
+		}
+		// In snap sync, it may happen that ancient data has been written to the
+		// ancient store, but the LastFastBlock has not been updated, truncate the
+		// extra data here.
+		snapBlock := bc.CurrentSnapBlock()
+		if snapBlock != nil && snapBlock.Number.Uint64() < frozen-1 {
+			needRewind = true
+			if snapBlock.Number.Uint64() < low || low == 0 {
+				low = snapBlock.Number.Uint64()
+			}
+		}
+		if needRewind {
+			log.Error("Truncating ancient chain", "from", bc.CurrentHeader().Number.Uint64(), "to", low)
+			if err := bc.SetHead(low); err != nil {
+				return nil, err
+			}
+		}
+	}
+	// The first thing the node will do is reconstruct the verification data for
+	// the head block (ethash cache or clique voting snapshot). Might as well do
+	// it in advance.
+	bc.engine.VerifyHeader(bc, bc.CurrentHeader())
+
+	if bc.logger != nil && bc.logger.OnBlockchainInit != nil {
+		bc.logger.OnBlockchainInit(chainConfig)
+	}
+	if bc.logger != nil && bc.logger.OnGenesisBlock != nil {
+		if block := bc.CurrentBlock(); block.Number.Uint64() == 0 {
+			alloc, err := getGenesisState(bc.db, block.Hash())
+			if err != nil {
+				return nil, fmt.Errorf("failed to get genesis state: %w", err)
+			}
+			if alloc == nil {
+				return nil, errors.New("live blockchain tracer requires genesis alloc to be set")
+			}
+			bc.logger.OnGenesisBlock(bc.genesisBlock, alloc)
+		}
+	}
+
+	// Load any existing snapshot, regenerating it if loading failed
+	if bc.cacheConfig.SnapshotLimit > 0 {
+		// If the chain was rewound past the snapshot persistent layer (causing
+		// a recovery block number to be persisted to disk), check if we're still
+		// in recovery mode and in that case, don't invalidate the snapshot on a
+		// head mismatch.
+		var recover bool
+
+		head := bc.CurrentBlock()
+		if layer := rawdb.ReadSnapshotRecoveryNumber(bc.db); layer != nil && *layer >= head.Number.Uint64() {
+			log.Warn("Enabling snapshot recovery", "chainhead", head.Number, "diskbase", *layer)
+			recover = true
+		}
+		snapconfig := snapshot.Config{
+			CacheSize:  bc.cacheConfig.SnapshotLimit,
+			Recovery:   recover,
+			NoBuild:    bc.cacheConfig.SnapshotNoBuild,
+			AsyncBuild: !bc.cacheConfig.SnapshotWait,
+		}
+		bc.snaps, _ = snapshot.New(snapconfig, bc.db, bc.triedb, head.Root)
+
+		// Re-initialize the state database with snapshot
+		bc.statedb = state.NewDatabase(bc.triedb, bc.snaps)
+	}
+
+	// Rewind the chain in case of an incompatible config upgrade.
+	if compatErr != nil {
+		log.Warn("Rewinding chain to upgrade configuration", "err", compatErr)
+		if compatErr.RewindToTime > 0 {
+			bc.SetHeadWithTimestamp(compatErr.RewindToTime)
+		} else {
+			bc.SetHead(compatErr.RewindToBlock)
+		}
+		rawdb.WriteChainConfig(db, genesisHash, chainConfig)
+	}
+	// Start tx indexer if it's enabled.
+	if txLookupLimit != nil {
+		bc.txIndexer = newTxIndexer(*txLookupLimit, bc)
+	}
+	return bc, nil
+}
+
+func NewBlockChainWithSimulatedStore(db ethdb.Database, cacheConfig *CacheConfig, genesis *Genesis, overrides *ChainOverrides, engine consensus.Engine, vmConfig vm.Config, txLookupLimit *uint64, simulatedStore *state.SimulatedChainStore) (*BlockChain, error) {
+	if cacheConfig == nil {
+		cacheConfig = defaultCacheConfig
+	}
+	// Open trie database with provided config
+	enableVerkle, err := EnableVerkleAtGenesis(db, genesis)
+	if err != nil {
+		return nil, err
+	}
+	triedb := triedb.NewDatabase(db, cacheConfig.triedbConfig(enableVerkle))
+
+	// Write the supplied genesis to the database if it has not been initialized
+	// yet. The corresponding chain config will be returned, either from the
+	// provided genesis or from the locally stored configuration if the genesis
+	// has already been initialized.
+	chainConfig, genesisHash, compatErr, err := SetupGenesisBlockWithOverride(db, triedb, genesis, overrides)
+	if err != nil {
+		return nil, err
+	}
+	log.Info("")
+	log.Info(strings.Repeat("-", 153))
+	for _, line := range strings.Split(chainConfig.Description(), "\n") {
+		log.Info(line)
+	}
+	log.Info(strings.Repeat("-", 153))
+	log.Info("")
+
+	bc := &BlockChain{
+		chainConfig:    chainConfig,
+		cacheConfig:    cacheConfig,
+		db:             db,
+		triedb:         triedb,
+		triegc:         prque.New[int64, common.Hash](nil),
+		quit:           make(chan struct{}),
+		chainmu:        syncx.NewClosableMutex(),
+		bodyCache:      lru.NewCache[common.Hash, *types.Body](bodyCacheLimit),
+		bodyRLPCache:   lru.NewCache[common.Hash, rlp.RawValue](bodyCacheLimit),
+		receiptsCache:  lru.NewCache[common.Hash, []*types.Receipt](receiptsCacheLimit),
+		blockCache:     lru.NewCache[common.Hash, *types.Block](blockCacheLimit),
+		txLookupCache:  lru.NewCache[common.Hash, txLookup](txLookupCacheLimit),
+		engine:         engine,
+		vmConfig:       vmConfig,
+		logger:         vmConfig.Tracer,
+		simulatedStore: simulatedStore,
 	}
 	bc.hc, err = NewHeaderChain(db, chainConfig, engine, bc.insertStopped)
 	if err != nil {

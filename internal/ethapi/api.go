@@ -317,7 +317,7 @@ func (api *BlockChainAPI) ChainId() *hexutil.Big {
 // BlockNumber returns the block number of the chain head.
 func (api *BlockChainAPI) BlockNumber() hexutil.Uint64 {
 	if simB, ok := api.b.(interface {
-		SimChainStore() *SimulatedChainStore
+		SimChainStore() *state.SimulatedChainStore
 		IsSimulateMode() bool
 	}); ok && simB.IsSimulateMode() {
 		// check in the local store
@@ -529,7 +529,7 @@ func (api *BlockChainAPI) GetBlockByNumber(ctx context.Context, number rpc.Block
 func (api *BlockChainAPI) GetBlockByHash(ctx context.Context, hash common.Hash, fullTx bool) (map[string]interface{}, error) {
 	// Simulated mode check
 	if simB, ok := api.b.(interface {
-		SimChainStore() *SimulatedChainStore
+		SimChainStore() *state.SimulatedChainStore
 		IsSimulateMode() bool
 	}); ok && simB.IsSimulateMode() {
 		// NOT MANAGED BY SIMULATED CHAIN STORE
@@ -804,7 +804,7 @@ func (api *BlockChainAPI) Call(ctx context.Context, args TransactionArgs, blockN
 //
 // Note, this function doesn't make any changes in the state/blockchain and is
 // useful to execute and retrieve values.
-func (api *BlockChainAPI) SimulateV1(ctx context.Context, opts simOpts, blockNrOrHash *rpc.BlockNumberOrHash) ([]*simBlockResult, error) {
+func (api *BlockChainAPI) SimulateV1(ctx context.Context, opts simOpts, blockNrOrHash *rpc.BlockNumberOrHash) ([]*state.SimBlockResult, error) {
 	if len(opts.BlockStateCalls) == 0 {
 		return nil, &invalidParamsError{message: "empty input"}
 	} else if len(opts.BlockStateCalls) > maxSimulateBlocks {
@@ -838,59 +838,56 @@ func (api *BlockChainAPI) SimulateV1(ctx context.Context, opts simOpts, blockNrO
 
 // SimulateV1IPSP is a variant of SimulateV1 that returns the final state.
 // used in solo mining in combination with the simulation store
-func (api *BlockChainAPI) SimulateV1IPSP(ctx context.Context, opts simOpts, blockNrOrHash *rpc.BlockNumberOrHash, originalTx *types.Transaction) ([]*simBlockResult, error, *state.StateDB) {
-	fmt.Println(">>> SimulateV1 entered")
-	os.Stdout.Sync()
-	if len(opts.BlockStateCalls) == 0 {
-		return nil, &invalidParamsError{message: "empty input"}, nil
-	} else if len(opts.BlockStateCalls) > maxSimulateBlocks {
-		return nil, &clientLimitExceededError{message: "too many blocks"}, nil
-	}
-	if blockNrOrHash == nil {
-		n := rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber)
-		blockNrOrHash = &n
-	}
-
-	state, base, err := api.b.StateAndHeaderByNumberOrHash(ctx, *blockNrOrHash)
-	if state == nil || err != nil {
-		return nil, err, nil
-	}
-	gasCap := api.b.RPCGasCap()
-	if gasCap == 0 {
-		gasCap = gomath.MaxUint64
-	}
-
-	sim := &simulator{
-		b:              api.b,
-		state:          state,
-		base:           base,
-		chainConfig:    api.b.ChainConfig(),
-		gp:             new(core.GasPool).AddGas(gasCap),
-		traceTransfers: opts.TraceTransfers,
-		validate:       opts.Validation,
-		fullTx:         opts.ReturnFullTransactions,
-	}
-
-	results, err := sim.execute(ctx, opts.BlockStateCalls)
-	if err != nil {
-		return nil, err, nil
-	}
-
-	// Store simulated artifacts if supported
-	if simStore, ok := api.b.(interface {
-		SimChainStore() *SimulatedChainStore
+func (api *BlockChainAPI) SimulateV1IPSP(ctx context.Context, opts simOpts, blockNrOrHash *rpc.BlockNumberOrHash, originalTx *types.Transaction) ([]*state.SimBlockResult, error, *state.StateDB) {
+	if simB, ok := api.b.(interface {
+		SimChainStore() *state.SimulatedChainStore
 		IsSimulateMode() bool
-	}); ok && simStore.IsSimulateMode() {
-		fmt.Printf("simulation activited %v \n", simStore.IsSimulateMode())
-		StoreSimulatedArtifacts(simStore.SimChainStore(), results, sim.state, originalTx) // Pass nil for originalTx here
-	}
+	}); ok && simB.IsSimulateMode() {
+		if len(opts.BlockStateCalls) == 0 {
+			return nil, &invalidParamsError{message: "empty input"}, nil
+		} else if len(opts.BlockStateCalls) > maxSimulateBlocks {
+			return nil, &clientLimitExceededError{message: "too many blocks"}, nil
+		}
+		if blockNrOrHash == nil {
+			n := rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber)
+			blockNrOrHash = &n
+		}
 
-	return results, nil, sim.state
+		state, base, err := api.b.StateAndHeaderByNumberOrHash(ctx, *blockNrOrHash)
+		if state == nil || err != nil {
+			return nil, err, nil
+		}
+		gasCap := api.b.RPCGasCap()
+		if gasCap == 0 {
+			gasCap = gomath.MaxUint64
+		}
+
+		sim := &simulator{
+			b:              api.b,
+			state:          state,
+			base:           base,
+			chainConfig:    api.b.ChainConfig(),
+			gp:             new(core.GasPool).AddGas(gasCap),
+			traceTransfers: opts.TraceTransfers,
+			validate:       opts.Validation,
+			fullTx:         opts.ReturnFullTransactions,
+		}
+
+		results, err := sim.execute(ctx, opts.BlockStateCalls)
+		if err != nil {
+			return nil, err, nil
+		}
+
+		fmt.Printf("simulation activited %v \n", simB.IsSimulateMode())
+		StoreSimulatedArtifacts(simB.SimChainStore(), results, sim.state, originalTx) // Pass nil for originalTx here
+		return results, nil, sim.state
+	}
+	return []*state.SimBlockResult{}, nil, nil
 }
 
 // StoreSimulatedArtifacts stores the results of a simulation into the simStore.
 // It optionally accepts the original transaction to ensure the correct hash is used for storage.
-func StoreSimulatedArtifacts(simStore *SimulatedChainStore, results []*simBlockResult, state *state.StateDB, originalTx *types.Transaction) {
+func StoreSimulatedArtifacts(simStore *state.SimulatedChainStore, results []*state.SimBlockResult, state *state.StateDB, originalTx *types.Transaction) {
 
 	if simStore == nil {
 		return
@@ -916,12 +913,8 @@ func StoreSimulatedArtifacts(simStore *SimulatedChainStore, results []*simBlockR
 			// adds block, txs, and receipts, potentially using the original hash
 			simStore.StoreBlock(res, originalHash)
 		}
-
-		for _, account := range StoreSimulatedAccountState(state) {
-			if account != nil {
-				simStore.CreateSimulatedAccount(account)
-			}
-		}
+		// create ot updated accounts in sore.
+		simStore.CreateOrUpdateAccounts(state)
 	}
 }
 
@@ -1452,7 +1445,7 @@ func (api *TransactionAPI) GetTransactionByHash(ctx context.Context, hash common
 
 	// Check simulated store first if simulate-mode is on
 	if simB, ok := api.b.(interface {
-		SimChainStore() *SimulatedChainStore
+		SimChainStore() *state.SimulatedChainStore
 		IsSimulateMode() bool
 	}); ok && simB.IsSimulateMode() {
 		simStore := simB.SimChainStore()
@@ -1527,7 +1520,7 @@ func (api *TransactionAPI) GetTransactionReceipt(ctx context.Context, hash commo
 
 	//  Check simulated store first if simulate-mode is on
 	if simB, ok := api.b.(interface {
-		SimChainStore() *SimulatedChainStore
+		SimChainStore() *state.SimulatedChainStore
 		IsSimulateMode() bool
 	}); ok && simB.IsSimulateMode() {
 		if receipt, ok := simB.SimChainStore().GetReceipt(hash); ok {
@@ -1721,7 +1714,7 @@ func (api *TransactionAPI) SendRawTransaction(ctx context.Context, input hexutil
 	// Simulated mode logic
 	if simB, ok := api.b.(interface {
 		IsSimulateMode() bool
-		SimChainStore() *SimulatedChainStore
+		SimChainStore() *state.SimulatedChainStore
 	}); ok {
 		if simB.IsSimulateMode() {
 			// Simulate transaction logic here
@@ -1748,7 +1741,7 @@ func (api *TransactionAPI) SendRawTransactionBackup(ctx context.Context, input h
 	// Simulated mode logic
 	if simB, ok := api.b.(interface {
 		IsSimulateMode() bool
-		SimChainStore() *SimulatedChainStore
+		SimChainStore() *state.SimulatedChainStore
 	}); ok {
 		if simB.IsSimulateMode() {
 			// Simulate transaction logic here
@@ -2130,7 +2123,7 @@ func simulateAndStore(ctx context.Context, backend Backend, tx *types.Transactio
 
 	// Store simulated artifacts if the backend supports it and is in simulate mode
 	if simStoreProvider, ok := backend.(interface {
-		SimChainStore() *SimulatedChainStore
+		SimChainStore() *state.SimulatedChainStore
 		IsSimulateMode() bool // Corrected: Use exported method name
 	}); ok && simStoreProvider.IsSimulateMode() { // Corrected: Call exported method
 		simStore := simStoreProvider.SimChainStore()
@@ -2142,19 +2135,19 @@ func simulateAndStore(ctx context.Context, backend Backend, tx *types.Transactio
 	return nil
 }
 
-func (api *TransactionAPI) GetTransactionEventsFromBackend(ctx context.Context, backend Backend, txHash common.Hash) (FullTransactionEvents, error) {
+func (api *TransactionAPI) GetTransactionEventsFromBackend(ctx context.Context, backend Backend, txHash common.Hash) (state.FullTransactionEvents, error) {
 	if simStoreProvider, ok := backend.(interface {
-		SimChainStore() *SimulatedChainStore
+		SimChainStore() *state.SimulatedChainStore
 		IsSimulateMode() bool // Corrected: Use exported method name
 	}); ok && simStoreProvider.IsSimulateMode() { // Corrected: Call exported method
 		simStore := simStoreProvider.SimChainStore()
 		events, ok := simStore.GetTxEvents(txHash)
 		if !ok {
-			return FullTransactionEvents{}, fmt.Errorf("transaction events not found")
+			return state.FullTransactionEvents{}, fmt.Errorf("transaction events not found")
 		}
 		return events, nil
 	}
-	return FullTransactionEvents{}, fmt.Errorf("simulation store not found")
+	return state.FullTransactionEvents{}, fmt.Errorf("simulation store not found")
 }
 func TransactionArgsFromTransaction(tx *types.Transaction) TransactionArgs {
 	nonce := hexutil.Uint64(tx.Nonce())
@@ -2221,10 +2214,10 @@ type YourCustomEvent struct {
 	TxHash    common.Hash    `json:"transactionHash"`
 }
 
-func (api *TransactionAPI) GetTransactionEvents(ctx context.Context, hash common.Hash) (*FullTransactionEvents, error) {
+func (api *TransactionAPI) GetTransactionEvents(ctx context.Context, hash common.Hash) (*state.FullTransactionEvents, error) {
 	// Check if the backend supports simulate mode and has a SimChainStore
 	if simB, ok := api.b.(interface {
-		SimChainStore() *SimulatedChainStore
+		SimChainStore() *state.SimulatedChainStore
 		IsSimulateMode() bool
 	}); ok && simB.IsSimulateMode() {
 		store := simB.SimChainStore()
@@ -2241,5 +2234,5 @@ func (api *TransactionAPI) GetTransactionEvents(ctx context.Context, hash common
 }
 
 type SimChainStoreBackend interface {
-	SimChainStore() *SimulatedChainStore
+	SimChainStore() *state.SimulatedChainStore
 }

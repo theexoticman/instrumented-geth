@@ -1,20 +1,20 @@
-// Copyright 2024 The go-ethereum Authors
-// This file is part of the go-ethereum library.
-//
-// The go-ethereum library is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Lesser General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// The go-ethereum library is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Lesser General Public License for more details.
-//
-// You should have received a copy of the GNU Lesser General Public License
-// along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
+// // Copyright 2024 The go-ethereum Authors
+// // This file is part of the go-ethereum library.
+// //
+// // The go-ethereum library is free software: you can redistribute it and/or modify
+// // it under the terms of the GNU Lesser General Public License as published by
+// // the Free Software Foundation, either version 3 of the License, or
+// // (at your option) any later version.
+// //
+// // The go-ethereum library is distributed in the hope that it will be useful,
+// // but WITHOUT ANY WARRANTY; without even the implied warranty of
+// // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// // GNU Lesser General Public License for more details.
+// //
+// // You should have received a copy of the GNU Lesser General Public License
+// // along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
-package ethapi
+package ethapi_test
 
 import (
 	"context"
@@ -28,10 +28,14 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/eth"
+	"github.com/ethereum/go-ethereum/internal/ethapi"
+
+	// "github.com/ethereum/go-ethereum/eth"
 
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/ethclient/simulated"
-	ethapi "github.com/ethereum/go-ethereum/internal/ethapi"
+
+	// ethapi "github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/holiman/uint256"
 
 	"github.com/stretchr/testify/assert"
@@ -143,7 +147,7 @@ func TestEventTracer(t *testing.T) {
 
 	amount := big.NewInt(1e17)
 	tx1 := types.NewTransaction(nonce, recipient1Addr, amount, 21000, gasPrice, nil)
-	tx2 := types.NewTransaction(nonce, recipient2Addr, amount, 21000, gasPrice, nil)
+	tx2 := types.NewTransaction(nonce+1, recipient2Addr, amount, 21000, gasPrice, nil)
 	signer := types.LatestSignerForChainID(big.NewInt(1337))
 	signedTx1, err := types.SignTx(tx1, signer, senderKey)
 	assert.NoError(t, err)

@@ -27,8 +27,8 @@ import (
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/rpc"
 )
 
@@ -697,8 +697,8 @@ func (ec *Client) SendTransaction(ctx context.Context, tx *types.Transaction) er
 	return ec.c.CallContext(ctx, nil, "eth_sendRawTransaction", hexutil.Encode(data))
 }
 
-func (ec *Client) GetTransactionEvents(ctx context.Context, hash common.Hash) (ethapi.FullTransactionEvents, error) {
-	var result ethapi.FullTransactionEvents
+func (ec *Client) GetTransactionEvents(ctx context.Context, hash common.Hash) (state.FullTransactionEvents, error) {
+	var result state.FullTransactionEvents
 	err := ec.c.CallContext(ctx, &result, "eth_getTransactionEvents", hash.Hex())
 	if err != nil {
 		return result, err

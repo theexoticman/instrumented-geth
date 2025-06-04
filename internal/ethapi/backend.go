@@ -84,7 +84,7 @@ type Backend interface {
 	TxPoolContentFrom(addr common.Address) ([]*types.Transaction, []*types.Transaction)
 	SubscribeNewTxsEvent(chan<- core.NewTxsEvent) event.Subscription
 	// New GetEvents endpoint
-	GetTransactionEvents(ctx context.Context, hash common.Hash) (*FullTransactionEvents, error)
+	GetTransactionEvents(ctx context.Context, hash common.Hash) (*state.FullTransactionEvents, error)
 
 	ChainConfig() *params.ChainConfig
 	Engine() consensus.Engine
@@ -101,7 +101,7 @@ type Backend interface {
 	CurrentView() *filtermaps.ChainView
 	NewMatcherBackend() filtermaps.MatcherBackend
 
-	SimChainStore() *SimulatedChainStore
+	SimChainStore() *state.SimulatedChainStore
 	IsSimulateMode() bool
 }
 
