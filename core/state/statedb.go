@@ -342,10 +342,7 @@ func (s *StateDB) GetBalance(addr common.Address) *uint256.Int {
 // GetNonce retrieves the nonce from the given address or 0 if object not found
 func (s *StateDB) GetNonce(addr common.Address) uint64 {
 	if s.SimStore != nil {
-		// fmt.Println("GetNonce")
-		// fmt.Println("accounts in store", len(s.SimStore.accounts))
-		// fmt.Println("account address", addr.Hex())
-		// fmt.Println("account nonce", s.SimStore.GetAccount(addr))
+
 		if simAcct := s.SimStore.GetAccount(addr); simAcct != nil && simAcct.Nonce != 0 {
 			return simAcct.Nonce
 		}
@@ -423,10 +420,6 @@ func (s *StateDB) GetState(addr common.Address, hash common.Hash) common.Hash {
 	if s.SimStore != nil {
 		if simAcct := s.SimStore.GetAccount(addr); simAcct != nil {
 			if value, exists := simAcct.Storage[hash]; exists {
-				fmt.Println("GetState")
-				fmt.Println("addr", addr.Hex())
-				fmt.Println("hash", hash.Hex())
-				fmt.Println("value", value.Hex())
 				os.Stdout.Sync()
 				return value
 			}
@@ -545,10 +538,6 @@ func (s *StateDB) SetCode(addr common.Address, code []byte) (prev []byte) {
 }
 
 func (s *StateDB) SetState(addr common.Address, key, value common.Hash) common.Hash {
-	fmt.Println("SetState")
-	fmt.Println("addr", addr.Hex())
-	fmt.Println("key", key.Hex())
-	fmt.Println("value", value.Hex())
 	os.Stdout.Sync()
 	if stateObject := s.getOrNewStateObject(addr); stateObject != nil {
 		if s.SimStore != nil { // If simulation is active
