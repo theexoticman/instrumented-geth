@@ -792,7 +792,7 @@ func (api *BlockChainAPI) Call(ctx context.Context, args TransactionArgs, blockN
 		return nil, err
 	}
 	if errors.Is(result.Err, vm.ErrExecutionReverted) {
-		return nil, newRevertError(result.Revert())
+		return nil, NewRevertError(result.Revert())
 	}
 	return result.Return(), result.Err
 }
@@ -836,17 +836,18 @@ func (api *BlockChainAPI) SimulateV1(ctx context.Context, opts simOpts, blockNrO
 	return sim.execute(ctx, opts.BlockStateCalls)
 }
 
+// TODO MOVE TO ETHEREUM PACKAGE
 // SimulateV1IPSP is a variant of SimulateV1 that returns the final state.
 // used in solo mining in combination with the simulation store
-func (api *BlockChainAPI) SimulateV1IPSP(ctx context.Context, opts simOpts, blockNrOrHash *rpc.BlockNumberOrHash, originalTx *types.Transaction) ([]*state.SimBlockResult, error, *state.StateDB) {
+func (api *BlockChainAPI) SimulateV1IPSP(ctx context.Context, opts simOpts, blockNrOrHash *rpc.BlockNumberOrHash) ([]*state.SimBlockResult, error) {
 	if simB, ok := api.b.(interface {
 		SimChainStore() *state.SimulatedChainStore
 		IsSimulateMode() bool
 	}); ok && simB.IsSimulateMode() {
 		if len(opts.BlockStateCalls) == 0 {
-			return nil, &invalidParamsError{message: "empty input"}, nil
+			return nil, &invalidParamsError{message: "empty input"}
 		} else if len(opts.BlockStateCalls) > maxSimulateBlocks {
-			return nil, &clientLimitExceededError{message: "too many blocks"}, nil
+			return nil, &clientLimitExceededError{message: "too many blocks"}
 		}
 		if blockNrOrHash == nil {
 			n := rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber)
@@ -855,7 +856,7 @@ func (api *BlockChainAPI) SimulateV1IPSP(ctx context.Context, opts simOpts, bloc
 
 		state, base, err := api.b.StateAndHeaderByNumberOrHash(ctx, *blockNrOrHash)
 		if state == nil || err != nil {
-			return nil, err, nil
+			return nil, err
 		}
 		gasCap := api.b.RPCGasCap()
 		if gasCap == 0 {
@@ -875,16 +876,22 @@ func (api *BlockChainAPI) SimulateV1IPSP(ctx context.Context, opts simOpts, bloc
 
 		results, err := sim.execute(ctx, opts.BlockStateCalls)
 		if err != nil {
-			return nil, err, nil
+			return nil, err
 		}
-
-		fmt.Printf("simulation activited %v \n", simB.IsSimulateMode())
-		StoreSimulatedArtifacts(simB.SimChainStore(), results, sim.state, originalTx) // Pass nil for originalTx here
-		return results, nil, sim.state
+		// store the tx in the simulation TX pool
+		for _, res := range results {
+			// add all the simulation results
+			for index := 0; index < len(res.Calls); index++ {
+				api.b.TxSimulationPool().AddUserSimulation(res.Receipts[index].TxHash, res.Calls[index].FTE)
+			}
+		}
+		// StoreSimulatedArtifacts(simB.SimChainStore(), results, sim.state, originalTx) // Pass nil for originalTx here
+		return results, nil
 	}
-	return []*state.SimBlockResult{}, nil, nil
+	return []*state.SimBlockResult{}, nil
 }
 
+// TODO MOVE TO ETHEREUM PACKAGE
 // StoreSimulatedArtifacts stores the results of a simulation into the simStore.
 // It optionally accepts the original transaction to ensure the correct hash is used for storage.
 func StoreSimulatedArtifacts(simStore *state.SimulatedChainStore, results []*state.SimBlockResult, state *state.StateDB, originalTx *types.Transaction) {
@@ -954,7 +961,7 @@ func DoEstimateGas(ctx context.Context, b Backend, args TransactionArgs, blockNr
 	estimate, revert, err := gasestimator.Estimate(ctx, call, opts, gasCap)
 	if err != nil {
 		if errors.Is(err, vm.ErrExecutionReverted) {
-			return 0, newRevertError(revert)
+			return 0, NewRevertError(revert)
 		}
 		return 0, err
 	}
@@ -1701,7 +1708,7 @@ func (api *TransactionAPI) FillTransaction(ctx context.Context, args Transaction
 
 // SendRawTransaction will add the signed transaction to the transaction pool.
 // The sender is responsible for signing the transaction and using the correct nonce.
-func (api *TransactionAPI) SendRawTransaction(ctx context.Context, input hexutil.Bytes) (common.Hash, error) {
+func (api *TransactionAPI) SendRawTransactionBackup(ctx context.Context, input hexutil.Bytes) (common.Hash, error) {
 	// normal geth logic
 	tx := new(types.Transaction)
 
@@ -1731,27 +1738,11 @@ func (api *TransactionAPI) SendRawTransaction(ctx context.Context, input hexutil
 
 // SendRawTransaction will add the signed transaction to the transaction pool.
 // The sender is responsible for signing the transaction and using the correct nonce.
-func (api *TransactionAPI) SendRawTransactionBackup(ctx context.Context, input hexutil.Bytes) (common.Hash, error) {
-	// normal geth logic
+func (api *TransactionAPI) SendRawTransaction(ctx context.Context, input hexutil.Bytes) (common.Hash, error) {
 	tx := new(types.Transaction)
 	if err := tx.UnmarshalBinary(input); err != nil {
 		return common.Hash{}, err
 	}
-
-	// Simulated mode logic
-	if simB, ok := api.b.(interface {
-		IsSimulateMode() bool
-		SimChainStore() *state.SimulatedChainStore
-	}); ok {
-		if simB.IsSimulateMode() {
-			// Simulate transaction logic here
-			if err := simulateAndStore(ctx, api.b, tx); err != nil {
-				return common.Hash{}, err
-			}
-			return tx.Hash(), nil
-		}
-	}
-	// normal geth logic
 	return SubmitTransaction(ctx, api.b, tx)
 }
 
@@ -2113,7 +2104,7 @@ func simulateAndStore(ctx context.Context, backend Backend, tx *types.Transactio
 
 	// Call simulate
 	simulateAPI := &BlockChainAPI{b: backend}
-	results, err, finalState := simulateAPI.SimulateV1IPSP(ctx, opts, nil, tx)
+	results, err := simulateAPI.SimulateV1IPSP(ctx, opts, nil)
 	if err != nil {
 		return fmt.Errorf("simulation failed: %w", err)
 	}
@@ -2128,7 +2119,7 @@ func simulateAndStore(ctx context.Context, backend Backend, tx *types.Transactio
 	}); ok && simStoreProvider.IsSimulateMode() { // Corrected: Call exported method
 		simStore := simStoreProvider.SimChainStore()
 		if simStore != nil {
-			StoreSimulatedArtifacts(simStore, results, finalState, tx) // Use the existing utility
+			// StoreSimulatedArtifacts(simStore, results, finalState, tx) // Use the existing utility
 		}
 	}
 
@@ -2214,6 +2205,14 @@ type YourCustomEvent struct {
 	TxHash    common.Hash    `json:"transactionHash"`
 }
 
+func (api *TransactionAPI) StoreUserSimulation(hash common.Hash, events state.FullTransactionEvents) error {
+	if simStoreProvider, ok := api.b.(interface {
+		IsSimulateMode() bool
+	}); ok && simStoreProvider.IsSimulateMode() {
+		api.b.TxSimulationPool().AddUserSimulation(hash, events)
+	}
+	return nil
+}
 func (api *TransactionAPI) GetTransactionEvents(ctx context.Context, hash common.Hash) (*state.FullTransactionEvents, error) {
 	// Check if the backend supports simulate mode and has a SimChainStore
 	if simB, ok := api.b.(interface {

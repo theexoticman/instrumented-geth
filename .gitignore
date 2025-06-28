@@ -56,3 +56,16 @@ cmd/evm/evm
 cmd/geth/geth
 cmd/rlpdump/rlpdump
 cmd/workload/workload
+cmd/geth/__debug_bin*
+
+# local config used by the clique_config/datadir
+clique_config/
+datadir/
+
+flow_protect_user.md
+geth
+graph.md.m
+local_scripts/
+miner/minertracer/
+todo.md
+TODO

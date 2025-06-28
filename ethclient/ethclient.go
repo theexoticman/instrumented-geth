@@ -697,11 +697,37 @@ func (ec *Client) SendTransaction(ctx context.Context, tx *types.Transaction) er
 	return ec.c.CallContext(ctx, nil, "eth_sendRawTransaction", hexutil.Encode(data))
 }
 
+// StoreUserSimulation sends a user-generated transaction simulation to the node.
+// This is a custom endpoint and may not be available on all nodes.
+func (ec *Client) StoreUserSimulation(ctx context.Context, hash common.Hash, events state.FullTransactionEvents) error {
+	return ec.c.CallContext(ctx, nil, "eth_storeUserSimulation", hash, events)
+}
+
 func (ec *Client) GetTransactionEvents(ctx context.Context, hash common.Hash) (state.FullTransactionEvents, error) {
 	var result state.FullTransactionEvents
 	err := ec.c.CallContext(ctx, &result, "eth_getTransactionEvents", hash.Hex())
 	if err != nil {
 		return result, err
+	}
+	return result, nil
+}
+
+// SimulateV1IPSP simulates the execution of one or more transactions against a given block.
+// The opts parameter is a map that should be structured to match the 'simOpts' struct
+// on the server side, containing the blocks and transactions to simulate.
+// The block context can be specified with blockNrOrHash, defaulting to "latest" if nil.
+func (ec *Client) SimulateV1IPSP(ctx context.Context, opts map[string]interface{}, blockNrOrHash *rpc.BlockNumberOrHash) ([]*state.SimBlockResult, error) {
+	var result []*state.SimBlockResult
+
+	// The RPC call expects the parameters as a slice.
+	params := []interface{}{opts}
+	if blockNrOrHash != nil {
+		params = append(params, blockNrOrHash)
+	}
+
+	err := ec.c.CallContext(ctx, &result, "eth_simulateV1IPSP", params...)
+	if err != nil {
+		return nil, err
 	}
 	return result, nil
 }

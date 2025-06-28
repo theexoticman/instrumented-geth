@@ -28,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/filtermaps"
+	"github.com/ethereum/go-ethereum/core/firewall"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
@@ -101,8 +102,10 @@ type Backend interface {
 	CurrentView() *filtermaps.ChainView
 	NewMatcherBackend() filtermaps.MatcherBackend
 
+	// Added for IPSP
 	SimChainStore() *state.SimulatedChainStore
 	IsSimulateMode() bool
+	TxSimulationPool() *firewall.TxSimulationPool
 }
 
 func GetAPIs(apiBackend Backend) []rpc.API {

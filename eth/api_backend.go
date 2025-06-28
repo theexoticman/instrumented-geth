@@ -30,6 +30,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/filtermaps"
+	"github.com/ethereum/go-ethereum/core/firewall"
 	"github.com/ethereum/go-ethereum/core/history"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
@@ -53,6 +54,7 @@ type EthAPIBackend struct {
 	gpo                   *gasprice.Oracle
 	SimStore              *state.SimulatedChainStore // Add this field
 	IsSimulateModeEnabled bool
+	txSimulationPool      *firewall.TxSimulationPool // DONT USE THIS, USE THE ONE IN THE ETHEREUM PACKAGE
 }
 
 // ChainConfig returns the active chain configuration.

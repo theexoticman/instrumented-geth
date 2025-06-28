@@ -31,6 +31,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/filtermaps"
+	"github.com/ethereum/go-ethereum/core/firewall"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/state/pruner"
@@ -104,8 +105,9 @@ type Ethereum struct {
 	shutdownTracker *shutdowncheck.ShutdownTracker // Tracks if and when the node has shutdown ungracefully
 
 	// simulate mode
-	isSimulateMode bool
-	simStore       *state.SimulatedChainStore
+	isSimulateMode   bool
+	simStore         *state.SimulatedChainStore
+	txSimulationPool *firewall.TxSimulationPool
 }
 
 // New creates a new Ethereum object (including the initialisation of the common Ethereum object),
@@ -181,6 +183,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	// Advanced Simulate mode
 	if config.SimulateMode {
 		eth.simStore = state.NewSimulatedChainStore()
+		eth.txSimulationPool = firewall.NewTxSimulationPool()
 	}
 	bcVersion := rawdb.ReadDatabaseVersion(chainDb)
 	var dbVer = "<nil>"
@@ -236,17 +239,9 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	if config.OverrideVerkle != nil {
 		overrides.OverrideVerkle = config.OverrideVerkle
 	}
-	if config.SimulateMode {
-		// set the local store in the backend
-		eth.simStore = state.NewSimulatedChainStore() // Initialize the simStore for the Ethereum service
 
-	}
+	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, config.Genesis, &overrides, eth.engine, vmConfig, &config.TransactionHistory)
 
-	if eth.isSimulateMode {
-		eth.blockchain, err = core.NewBlockChainWithSimulatedStore(chainDb, cacheConfig, config.Genesis, &overrides, eth.engine, vmConfig, &config.TransactionHistory, eth.simStore)
-	} else {
-		eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, config.Genesis, &overrides, eth.engine, vmConfig, &config.TransactionHistory)
-	}
 	if err != nil {
 		return nil, err
 	}
@@ -311,7 +306,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 
 	eth.dropper = newDropper(eth.p2pServer.MaxDialedConns(), eth.p2pServer.MaxInboundConns())
 
-	eth.miner = miner.New(eth, config.Miner, eth.engine)
+	eth.miner = miner.New(eth, config.Miner, eth.engine, eth.txSimulationPool)
 	eth.miner.SetExtra(makeExtraData(config.Miner.ExtraData))
 	eth.miner.SetPrioAddresses(config.TxPool.Locals)
 
@@ -322,6 +317,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		gpo:                   nil,
 		SimStore:              eth.simStore,
 		IsSimulateModeEnabled: eth.isSimulateMode,
+		txSimulationPool:      eth.txSimulationPool,
 	}
 	if eth.APIBackend.allowUnprotectedTxs {
 		log.Info("Unprotected transactions allowed")
@@ -591,4 +587,12 @@ func (s *Ethereum) IsSimulateMode() bool {
 
 func (e *Ethereum) SimChainStore() *state.SimulatedChainStore {
 	return e.simStore
+}
+
+func (e *Ethereum) TxSimulationPool() *firewall.TxSimulationPool {
+	return e.txSimulationPool
+}
+
+func (b *EthAPIBackend) TxSimulationPool() *firewall.TxSimulationPool {
+	return b.txSimulationPool
 }

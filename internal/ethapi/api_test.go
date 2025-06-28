@@ -847,7 +847,7 @@ func TestEstimateGas(t *testing.T) {
 				},
 			},
 			blockOverrides: override.BlockOverrides{Number: (*hexutil.Big)(big.NewInt(11))},
-			expectErr:      newRevertError(packRevert("block 11")),
+			expectErr:      NewRevertError(packRevert("block 11")),
 		},
 		// Should be able to send to an EIP-7702 delegated account.
 		{

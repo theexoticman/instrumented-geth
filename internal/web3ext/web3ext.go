@@ -595,6 +595,12 @@ web3._extend({
 			params: 2,
 			inputFormatter: [null, web3._extend.formatters.inputDefaultBlockNumberFormatter],
 		}),
+				new web3._extend.Method({
+			name: 'simulateV1IPSP',
+			call: 'eth_simulateV1IPSP',
+			params: 2,
+			inputFormatter: [null, web3._extend.formatters.inputDefaultBlockNumberFormatter],
+		}),
 		new web3._extend.Method({
 			name: 'getBlockReceipts',
 			call: 'eth_getBlockReceipts',
