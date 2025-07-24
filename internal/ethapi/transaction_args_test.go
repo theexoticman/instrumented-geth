@@ -31,6 +31,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/filtermaps"
+	"github.com/ethereum/go-ethereum/core/firewall"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
@@ -408,3 +409,13 @@ func (b *backendMock) CurrentView() *filtermaps.ChainView           { return nil
 func (b *backendMock) NewMatcherBackend() filtermaps.MatcherBackend { return nil }
 
 func (b *backendMock) HistoryPruningCutoff() uint64 { return 0 }
+
+func (b *backendMock) GetTransactionEvents(ctx context.Context, hash common.Hash) (*state.FullTransactionEvents, error) {
+	return nil, nil
+}
+
+func (b *backendMock) IsSimulateMode() bool { return false }
+
+func (b *backendMock) SimChainStore() *state.SimulatedChainStore { return nil }
+
+func (b *backendMock) TxSimulationPool() *firewall.TxSimulationPool { return nil }

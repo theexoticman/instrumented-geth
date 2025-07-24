@@ -71,11 +71,12 @@ type BlockContext struct {
 // All fields can change between transactions.
 type TxContext struct {
 	// Message information
-	Origin       common.Address      // Provides information for ORIGIN
-	GasPrice     *big.Int            // Provides information for GASPRICE (and is used to zero the basefee if NoBaseFee is set)
-	BlobHashes   []common.Hash       // Provides information for BLOBHASH
-	BlobFeeCap   *big.Int            // Is used to zero the blobbasefee if NoBaseFee is set
-	AccessEvents *state.AccessEvents // Capture all state accesses for this tx
+	Origin            common.Address      // Provides information for ORIGIN
+	GasPrice          *big.Int            // Provides information for GASPRICE (and is used to zero the basefee if NoBaseFee is set)
+	BlobHashes        []common.Hash       // Provides information for BLOBHASH
+	BlobFeeCap        *big.Int            // Is used to zero the blobbasefee if NoBaseFee is set
+	ForceRevertReason string              // If non-empty, forces the transaction to revert with this reason.
+	AccessEvents      *state.AccessEvents // Capture all state accesses for this tx
 }
 
 // EVM is the Ethereum Virtual Machine base object and provides

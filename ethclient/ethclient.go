@@ -29,6 +29,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/rpc"
 )
 
@@ -701,6 +702,16 @@ func (ec *Client) SendTransaction(ctx context.Context, tx *types.Transaction) er
 // This is a custom endpoint and may not be available on all nodes.
 func (ec *Client) StoreUserSimulation(ctx context.Context, hash common.Hash, events state.FullTransactionEvents) error {
 	return ec.c.CallContext(ctx, nil, "eth_storeUserSimulation", hash, events)
+}
+
+// SimulateBlock sends a block simulation request to the firewall API.
+func (ec *Client) SimulateBlock(ctx context.Context, args ethapi.FirewallAPIArgs) (*ethapi.FirewallAPIResult, error) {
+	var result ethapi.FirewallAPIResult
+	err := ec.c.CallContext(ctx, &result, "firewall_simulateBlock", args)
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
 
 func (ec *Client) GetTransactionEvents(ctx context.Context, hash common.Hash) (state.FullTransactionEvents, error) {

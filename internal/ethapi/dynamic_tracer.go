@@ -583,3 +583,8 @@ func bytesToParameters(data []byte) [][32]byte { // Changed from hexutil.Bytes t
 func (et *EventTracer) Logs() []*types.Log {
 	return et.logTracer.logs[0]
 }
+
+// GetEvents returns the final captured events for the transaction.
+func (et *EventTracer) GetEvents() state.FullTransactionEvents {
+	return et.fullTxEvents
+}

@@ -24,19 +24,15 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	"github.com/ethereum/go-ethereum/core"
-	"github.com/ethereum/go-ethereum/core/firewall"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/stateless"
 	"github.com/ethereum/go-ethereum/core/txpool"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
-	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/params"
 	"github.com/holiman/uint256"
 )
 
@@ -266,26 +262,6 @@ func (miner *Miner) makeEnv(parent *types.Header, header *types.Header, coinbase
 }
 
 func (miner *Miner) commitTransaction(env *environment, tx *types.Transaction) error {
-	// First, run a full simulation of the transaction in the current block context.
-	simResult, err := miner.simulateTxInBlockContext(env, tx)
-	if err != nil {
-		// This can happen for fundamental issues, like an invalid signature.
-		log.Trace("Transaction simulation failed", "hash", tx.Hash(), "err", err)
-		return err
-	}
-	if simResult.Error != nil {
-		// if ssimulation fails, we suppose the return fast as the tx would fail.
-		log.Trace("Transaction simulation resulted in revert", "hash", tx.Hash(), "err", simResult.Error.Message)
-		// We convert the simulation error back to a VM error so it's handled correctly upstream.
-		return errors.New(simResult.Error.Message)
-	}
-
-	log.Info("Simulated transaction successfully", "hash", tx.Hash())
-	// IPSP version we simulate the existing txs in the block with the new transaction to come
-	// SimulateV1IPSP()
-	// check if tx is part of the tx_validation mapping
-	// compare tx user simulation matchs the block simulation
-	// if ok, add, else drop tx.
 	if tx.Type() == types.BlobTxType {
 		return miner.commitBlobTransaction(env, tx)
 	}
@@ -297,81 +273,6 @@ func (miner *Miner) commitTransaction(env *environment, tx *types.Transaction) e
 	env.receipts = append(env.receipts, receipt)
 	env.tcount++
 	return nil
-}
-
-func (miner *Miner) compareTxSimulations(env *environment, tx *types.Transaction) (*state.SimCallResult, error) {
-	simResult, err := miner.simulateTxInBlockContext(env, tx)
-	if err != nil {
-		return nil, err
-	}
-	if simResult.Error != nil {
-		return nil, errors.New(simResult.Error.Message)
-	}
-	// get the transaction simulation from the simulated txs
-	if firewall.IsUserSimulated(tx.Hash()) {
-		userSimulation, err := firewall.GetTransactionSimulation(tx.Hash())
-		if err != nil {
-			return nil, err
-		}
-		if userSimulation.AreSimulationsSimilar(tx.Hash()) {
-			return simResult, nil
-		}
-	}
-}
-
-// simulateTxInBlockContext performs a pure, isolated simulation of a single transaction.
-// It uses a copy of the state and a custom tracer to capture detailed execution data,
-// such as balance transfers (fullTxEvents), without modifying the actual world state.
-func (miner *Miner) simulateTxInBlockContext(env *environment, tx *types.Transaction) (*state.SimCallResult, error) {
-	// 1. Create a safe, isolated copy of the state so the original is not modified.
-	simState := env.state.Copy()
-
-	// 2. Setup the tracer to capture the events we need (e.g., balance transfers).
-	tracer := firewall.NewMinerEventTracer(env.header.Number.Uint64())
-	tracer.Reset(tx.Hash(), uint(len(env.txs))) // tx index is the next one in the block
-	vmConfig := vm.Config{
-		Tracer:    tracer.GetHooks(),
-		NoBaseFee: true, // In the miner, we handle gas price checks ourselves.
-	}
-
-	// 3. Prepare the EVM environment for the single transaction execution.
-	blockCtx := core.NewEVMBlockContext(env.header, miner.chain, &env.coinbase)
-	// We use a hooked stateDB to route state accesses to the tracer.
-	hookedState := state.NewHookedState(simState, tracer.GetHooks())
-	evm := vm.NewEVM(blockCtx, hookedState, miner.chainConfig, vmConfig)
-
-	// 4. Execute the transaction.
-	// We use ApplyMessage directly, as it's the core execution logic used by simulations.
-	simState.SetTxContext(tx.Hash(), len(env.txs))
-	msg, err := core.TransactionToMessage(tx, env.signer, env.header.BaseFee)
-	if err != nil {
-		return nil, err
-	}
-	result, err := core.ApplyMessage(evm, msg, new(core.GasPool).AddGas(msg.GasLimit))
-	if err != nil {
-		return nil, err
-	}
-
-	// 5. Package the results into the desired SimCallResult structure.
-	callRes := &state.SimCallResult{
-		ReturnValue: result.Return(),
-		Logs:        simState.Logs(),
-		FTE:         tracer.FullTxEvents,
-		GasUsed:     hexutil.Uint64(result.UsedGas),
-	}
-	if result.Failed() {
-		callRes.Status = hexutil.Uint64(types.ReceiptStatusFailed)
-		if errors.Is(result.Err, vm.ErrExecutionReverted) {
-			revertErr := ethapi.NewRevertError(result.Revert())
-			callRes.Error = &state.CallError{Message: revertErr.Error(), Code: errCodeReverted, Data: revertErr.ErrorData().(string)}
-		} else {
-			callRes.Error = &state.CallError{Message: result.Err.Error(), Code: errCodeVMError, Data: result.Err.Error()}
-		}
-	} else {
-		callRes.Status = hexutil.Uint64(types.ReceiptStatusSuccessful)
-	}
-
-	return callRes, nil
 }
 
 func (miner *Miner) commitBlobTransaction(env *environment, tx *types.Transaction) error {
@@ -414,110 +315,113 @@ func (miner *Miner) applyTransaction(env *environment, tx *types.Transaction) (*
 	return receipt, err
 }
 
-func (miner *Miner) commitTransactions(env *environment, plainTxs, blobTxs *transactionsByPriceAndNonce, interrupt *atomic.Int32) error {
-	gasLimit := env.header.GasLimit
-	if env.gasPool == nil {
-		env.gasPool = new(core.GasPool).AddGas(gasLimit)
-	}
-	for {
-		// Check interruption signal and abort building if it's fired.
-		if interrupt != nil {
-			if signal := interrupt.Load(); signal != commitInterruptNone {
-				return signalToErr(signal)
-			}
-		}
-		// If we don't have enough gas for any further transactions then we're done.
-		if env.gasPool.Gas() < params.TxGas {
-			log.Trace("Not enough gas for further transactions", "have", env.gasPool, "want", params.TxGas)
-			break
-		}
-		// If we don't have enough blob space for any further blob transactions,
-		// skip that list altogether
-		if !blobTxs.Empty() && env.blobs >= eip4844.MaxBlobsPerBlock(miner.chainConfig, env.header.Time) {
-			log.Trace("Not enough blob space for further blob transactions")
-			blobTxs.Clear()
-			// Fall though to pick up any plain txs
-		}
-		// Retrieve the next transaction and abort if all done.
-		var (
-			ltx *txpool.LazyTransaction
-			txs *transactionsByPriceAndNonce
-		)
-		pltx, ptip := plainTxs.Peek()
-		bltx, btip := blobTxs.Peek()
+// SimResult represents the outcome of a single simulated transaction.
+// We are defining this here as a stand-in for a potential simulation result object,
+// assuming it contains at least the transaction and its receipt.
+type SimResult struct {
+	Tx      *types.Transaction
+	Receipt *types.Receipt
+}
 
-		switch {
-		case pltx == nil:
-			txs, ltx = blobTxs, bltx
-		case bltx == nil:
-			txs, ltx = plainTxs, pltx
-		default:
-			if ptip.Lt(btip) {
-				txs, ltx = blobTxs, bltx
-			} else {
-				txs, ltx = plainTxs, pltx
+// callSimulator is a placeholder function representing the call to the external
+// simulation service, e.g., ethapi.SimulateV1IPSP. It takes the candidate
+// transactions and returns the ones that should be included in the block, along
+// with their execution receipts.
+//
+// The actual implementation would handle the RPC call, parameter marshalling (simOpts),
+// and dependency injection of the API client.
+func (miner *Miner) callSimulator(parent *types.Header, transactions []*types.Transaction) ([]*SimResult, error) {
+	// TODO: Replace this with a real implementation.
+	// In a real implementation, this would be where you call your simulation logic:
+	//
+	// 1. Obtain a context, e.g., `ctx := context.Background()`.
+	// 2. Get an instance of your `BlockChainAPI`. This would likely need to be
+	//    injected into the Miner object when it's created to avoid import cycles.
+	// 3. Construct the `simOpts` and `blockNrOrHash` parameters. The parent hash
+	//    can be found in `parent.Hash()`. The transactions are in the `transactions` slice.
+	// 4. Make the call: `results, err := api.SimulateV1IPSP(ctx, opts, &rpc.BlockNumberOrHash{BlockHash: parent.Hash()})`
+	// 5. Convert the `[]*state.SimBlockResult` from the API into `[]*SimResult` for processing.
+
+	log.Warn("Transaction simulation is not implemented. Block will contain no transactions from this batch.")
+	return nil, fmt.Errorf("simulation logic not implemented")
+}
+
+// commitTransactionsWithSimulation uses an external simulator to select and order transactions,
+// then commits them to the environment. This function is intended to be called from
+// fillTransactions instead of the original commitTransactions.
+func (miner *Miner) commitTransactionsWithSimulation(env *environment, plainTxs, blobTxs *transactionsByPriceAndNonce, interrupt *atomic.Int32) error {
+	// 1. Collect all candidate transactions from the iterators into a single slice.
+	var candidates []*types.Transaction
+	drain := func(txs *transactionsByPriceAndNonce) {
+		for {
+			// Check for interruption signals.
+			if interrupt != nil {
+				if signal := interrupt.Load(); signal != commitInterruptNone {
+					return
+				}
 			}
+			ltx, _ := txs.Peek()
+			if ltx == nil {
+				break
+			}
+			if tx := ltx.Resolve(); tx != nil {
+				candidates = append(candidates, tx)
+			}
+			txs.Shift() // Use Shift to process one-by-one in price/nonce order.
 		}
-		if ltx == nil {
-			break
-		}
-		// If we don't have enough space for the next transaction, skip the account.
-		if env.gasPool.Gas() < ltx.Gas {
-			log.Trace("Not enough gas left for transaction", "hash", ltx.Hash, "left", env.gasPool.Gas(), "needed", ltx.Gas)
-			txs.Pop()
+	}
+	drain(plainTxs)
+	drain(blobTxs)
+
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	// 2. Call the simulator with the candidate transactions.
+	results, err := miner.callSimulator(env.header, candidates)
+	if err != nil {
+		// If simulation fails, we could fall back to the original greedy strategy.
+		// For now, we'll just log and continue, resulting in an empty block
+		// for this set of transactions.
+		log.Error("Failed to simulate transactions for block production", "err", err)
+		return nil // Return nil to allow other batches (e.g., normal txs) to be processed.
+	}
+
+	// 3. Commit the transactions returned by the simulator.
+	if env.gasPool == nil {
+		env.gasPool = new(core.GasPool).AddGas(env.header.GasLimit)
+	}
+
+	for _, result := range results {
+		tx := result.Tx
+		receipt := result.Receipt
+
+		// Basic checks to ensure the simulated transaction still fits.
+		if env.gasPool.Gas() < receipt.GasUsed {
+			log.Warn("Simulator returned transaction that exceeds gas limit", "hash", tx.Hash(), "have", env.gasPool.Gas(), "want", receipt.GasUsed)
 			continue
 		}
+		// Update environment with the simulated result. We trust the receipt
+		// from the simulator and don't re-execute the transaction.
+		env.gasPool.SubGas(receipt.GasUsed)
+		env.txs = append(env.txs, tx)
+		env.receipts = append(env.receipts, receipt)
+		env.tcount++
 
-		// Most of the blob gas logic here is agnostic as to if the chain supports
-		// blobs or not, however the max check panics when called on a chain without
-		// a defined schedule, so we need to verify it's safe to call.
-		if miner.chainConfig.IsCancun(env.header.Number, env.header.Time) {
-			left := eip4844.MaxBlobsPerBlock(miner.chainConfig, env.header.Time) - env.blobs
-			if left < int(ltx.BlobGas/params.BlobTxBlobGasPerBlob) {
-				log.Trace("Not enough blob space left for transaction", "hash", ltx.Hash, "left", left, "needed", ltx.BlobGas/params.BlobTxBlobGasPerBlob)
-				txs.Pop()
+		// Handle blob transactions specifically.
+		if tx.Type() == types.BlobTxType {
+			if tx.BlobTxSidecar() == nil {
+				log.Error("Simulated blob transaction is missing sidecar", "hash", tx.Hash())
+				continue // Or handle error appropriately.
+			}
+			maxBlobs := eip4844.MaxBlobsPerBlock(miner.chainConfig, env.header.Time)
+			if env.blobs+len(tx.BlobTxSidecar().Blobs) > maxBlobs {
+				log.Warn("Simulator returned transaction that exceeds blob limit", "hash", tx.Hash())
 				continue
 			}
-		}
-
-		// Transaction seems to fit, pull it up from the pool
-		tx := ltx.Resolve()
-		if tx == nil {
-			log.Trace("Ignoring evicted transaction", "hash", ltx.Hash)
-			txs.Pop()
-			continue
-		}
-
-		// Error may be ignored here. The error has already been checked
-		// during transaction acceptance in the transaction pool.
-		from, _ := types.Sender(env.signer, tx)
-
-		// Check whether the tx is replay protected. If we're not in the EIP155 hf
-		// phase, start ignoring the sender until we do.
-		if tx.Protected() && !miner.chainConfig.IsEIP155(env.header.Number) {
-			log.Trace("Ignoring replay protected transaction", "hash", ltx.Hash, "eip155", miner.chainConfig.EIP155Block)
-			txs.Pop()
-			continue
-		}
-		// Start executing the transaction
-		env.state.SetTxContext(tx.Hash(), env.tcount)
-
-		err := miner.commitTransaction(env, tx)
-		switch {
-		case errors.Is(err, core.ErrNonceTooLow):
-			// New head notification data race between the transaction pool and miner, shift
-			log.Trace("Skipping transaction with low nonce", "hash", ltx.Hash, "sender", from, "nonce", tx.Nonce())
-			txs.Shift()
-
-		case errors.Is(err, nil):
-			// Everything ok, collect the logs and shift in the next transaction from the same account
-			txs.Shift()
-
-		default:
-			// Transaction is regarded as invalid, drop all consecutive transactions from
-			// the same sender because of `nonce-too-high` clause.
-			log.Debug("Transaction failed, account skipped", "hash", ltx.Hash, "err", err)
-			txs.Pop()
+			env.sidecars = append(env.sidecars, tx.BlobTxSidecar())
+			env.blobs += len(tx.BlobTxSidecar().Blobs)
+			*env.header.BlobGasUsed += receipt.BlobGasUsed
 		}
 	}
 	return nil
@@ -567,7 +471,9 @@ func (miner *Miner) fillTransactions(interrupt *atomic.Int32, env *environment) 
 		plainTxs := newTransactionsByPriceAndNonce(env.signer, prioPlainTxs, env.header.BaseFee)
 		blobTxs := newTransactionsByPriceAndNonce(env.signer, prioBlobTxs, env.header.BaseFee)
 
-		if err := miner.commitTransactions(env, plainTxs, blobTxs, interrupt); err != nil {
+		//here, transactions are selected.
+
+		if err := miner.commitTransactionsWithSimulation(env, plainTxs, blobTxs, interrupt); err != nil {
 			return err
 		}
 	}
@@ -575,7 +481,7 @@ func (miner *Miner) fillTransactions(interrupt *atomic.Int32, env *environment) 
 		plainTxs := newTransactionsByPriceAndNonce(env.signer, normalPlainTxs, env.header.BaseFee)
 		blobTxs := newTransactionsByPriceAndNonce(env.signer, normalBlobTxs, env.header.BaseFee)
 
-		if err := miner.commitTransactions(env, plainTxs, blobTxs, interrupt); err != nil {
+		if err := miner.commitTransactionsWithSimulation(env, plainTxs, blobTxs, interrupt); err != nil {
 			return err
 		}
 	}
@@ -607,20 +513,3 @@ func signalToErr(signal int32) error {
 		panic(fmt.Errorf("undefined signal %d", signal))
 	}
 }
-
-const (
-	errCodeNonceTooHigh            = -38011
-	errCodeNonceTooLow             = -38010
-	errCodeIntrinsicGas            = -38013
-	errCodeInsufficientFunds       = -38014
-	errCodeBlockGasLimitReached    = -38015
-	errCodeBlockNumberInvalid      = -38020
-	errCodeBlockTimestampInvalid   = -38021
-	errCodeSenderIsNotEOA          = -38024
-	errCodeMaxInitCodeSizeExceeded = -38025
-	errCodeClientLimitExceeded     = -38026
-	errCodeInternalError           = -32603
-	errCodeInvalidParams           = -32602
-	errCodeReverted                = -32000
-	errCodeVMError                 = -32015
-)

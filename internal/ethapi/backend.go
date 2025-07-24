@@ -129,6 +129,9 @@ func GetAPIs(apiBackend Backend) []rpc.API {
 		}, {
 			Namespace: "eth",
 			Service:   NewEthereumAccountAPI(apiBackend.AccountManager()),
+		}, {
+			Namespace: "firewall",
+			Service:   NewFirewallAPI(apiBackend),
 		},
 	}
 }

@@ -69,3 +69,7 @@ local_scripts/
 miner/minertracer/
 todo.md
 TODO
+
+test/.env
+
+e2e_test/

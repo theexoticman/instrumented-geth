@@ -836,7 +836,7 @@ func (api *BlockChainAPI) SimulateV1(ctx context.Context, opts simOpts, blockNrO
 	return sim.execute(ctx, opts.BlockStateCalls)
 }
 
-// TODO MOVE TO ETHEREUM PACKAGE
+// TODO, split behavior if tx is of type 4
 // SimulateV1IPSP is a variant of SimulateV1 that returns the final state.
 // used in solo mining in combination with the simulation store
 func (api *BlockChainAPI) SimulateV1IPSP(ctx context.Context, opts simOpts, blockNrOrHash *rpc.BlockNumberOrHash) ([]*state.SimBlockResult, error) {
@@ -889,6 +889,47 @@ func (api *BlockChainAPI) SimulateV1IPSP(ctx context.Context, opts simOpts, bloc
 		return results, nil
 	}
 	return []*state.SimBlockResult{}, nil
+}
+
+// TODO, split behavior if tx is of type 4
+// SimulateBlockAndProtectTxs is called by block builders
+// Send the txs in order first in, first out/(executed)
+// receive block raw transaction paylod, block number
+// we create a EVM on the block number,
+// we iterate over the transactions, check if they are userSimulated. (simulation is stored in local store)
+// if so, we execute them and compare the both simulations
+// if not in the store of simulation, execute normally.
+// returns: the transaction that should be removed from the block and the reason why.
+func (api *BlockChainAPI) SimulateBlockAndProtectTxs(ctx context.Context, opts simOpts, blockNrOrHash *rpc.BlockNumberOrHash) ([]*state.SimBlockResult, error) {
+	if len(opts.BlockStateCalls) == 0 {
+		return nil, &invalidParamsError{message: "empty input"}
+	} else if len(opts.BlockStateCalls) > maxSimulateBlocks {
+		return nil, &clientLimitExceededError{message: "too many blocks"}
+	}
+	if blockNrOrHash == nil {
+		n := rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber)
+		blockNrOrHash = &n
+	}
+	state, base, err := api.b.StateAndHeaderByNumberOrHash(ctx, *blockNrOrHash)
+	if state == nil || err != nil {
+		return nil, err
+	}
+	gasCap := api.b.RPCGasCap()
+	if gasCap == 0 {
+		gasCap = gomath.MaxUint64
+	}
+	sim := &simulator{
+		b:           api.b,
+		state:       state,
+		base:        base,
+		chainConfig: api.b.ChainConfig(),
+		// Each tx and all the series of txes shouldn't consume more gas than cap
+		gp:             new(core.GasPool).AddGas(gasCap),
+		traceTransfers: opts.TraceTransfers,
+		validate:       opts.Validation,
+		fullTx:         opts.ReturnFullTransactions,
+	}
+	return sim.execute(ctx, opts.BlockStateCalls)
 }
 
 // TODO MOVE TO ETHEREUM PACKAGE
