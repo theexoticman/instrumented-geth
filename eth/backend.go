@@ -182,7 +182,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	}
 	// Advanced Simulate mode
 	if config.SimulateMode {
-		eth.simStore = state.NewSimulatedChainStore()
+		// eth.simStore = state.NewSimulatedChainStore()
 		eth.txSimulationPool = firewall.NewTxSimulationPool()
 	}
 	bcVersion := rawdb.ReadDatabaseVersion(chainDb)

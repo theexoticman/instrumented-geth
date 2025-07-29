@@ -17,12 +17,8 @@ import (
 	"github.com/holiman/uint256"
 )
 
-// SimulatedChainStore stores persists simulated transactions, blocks, receipts and txs for local-only chain state.
-// it is used to make demos on mainnet without having to:
-// 1. pay for gas on mainnet
-// 2. moving funds during demo and having to move them back to the original account
-// 3. this node will provide clients the state as if the simulation was run on mainnet.
-// so you wallet connect to this node, will look like the transaction actually happened on mainnet but it did not.
+// SimulatedChainStore stores persists simulated transactions.
+// ABANDONED FEATURE.
 
 type SimulatedChainStore struct {
 	txMu         sync.RWMutex

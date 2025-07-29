@@ -36,7 +36,6 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient/simulated"
 
 	// ethapi "github.com/ethereum/go-ethereum/internal/ethapi"
-	"github.com/holiman/uint256"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -61,68 +60,69 @@ func setupSimulatedEthereum(t *testing.T) (*simulated.Backend, *eth.Ethereum, *e
 // is successfully executed and mined in the simulated backend environment.
 // TestSimulateSimpleTransfer performs a basic simulated transaction and asserts state
 // TestSimulateSimpleTransfer performs a basic simulated transaction and asserts state
-func TestSimulateSimpleTransfer(t *testing.T) {
-	backend, ethService, senderKey, senderAddr := setupSimulatedEthereum(t)
-	defer backend.Close()
+// WE DONT NEED SIMSTORE ANYMORE
+// func TestSimulateSimpleTransfer(t *testing.T) {
+// 	backend, ethService, senderKey, senderAddr := setupSimulatedEthereum(t)
+// 	defer backend.Close()
 
-	ctx := context.Background()
-	client := ethclient.NewClient(backend.Node().Attach())
+// 	ctx := context.Background()
+// 	client := ethclient.NewClient(backend.Node().Attach())
 
-	recipientKey, _ := crypto.GenerateKey()
-	recipientAddr := crypto.PubkeyToAddress(recipientKey.PublicKey)
+// 	recipientKey, _ := crypto.GenerateKey()
+// 	recipientAddr := crypto.PubkeyToAddress(recipientKey.PublicKey)
 
-	nonce, err := client.PendingNonceAt(ctx, senderAddr)
-	assert.NoError(t, err)
+// 	nonce, err := client.PendingNonceAt(ctx, senderAddr)
+// 	assert.NoError(t, err)
 
-	gasPrice, err := client.SuggestGasPrice(ctx)
-	assert.NoError(t, err)
+// 	gasPrice, err := client.SuggestGasPrice(ctx)
+// 	assert.NoError(t, err)
 
-	amount := big.NewInt(1e17)
-	tx := types.NewTransaction(nonce, recipientAddr, amount, 21000, gasPrice, nil)
-	signer := types.LatestSignerForChainID(big.NewInt(1337))
-	signedTx, err := types.SignTx(tx, signer, senderKey)
-	assert.NoError(t, err)
+// 	amount := big.NewInt(1e17)
+// 	tx := types.NewTransaction(nonce, recipientAddr, amount, 21000, gasPrice, nil)
+// 	signer := types.LatestSignerForChainID(big.NewInt(1337))
+// 	signedTx, err := types.SignTx(tx, signer, senderKey)
+// 	assert.NoError(t, err)
 
-	// RLP encode the transaction for SendRawTransaction
-	rlpTx, err := signedTx.MarshalBinary()
-	assert.NoError(t, err)
+// 	// RLP encode the transaction for SendRawTransaction
+// 	rlpTx, err := signedTx.MarshalBinary()
+// 	assert.NoError(t, err)
 
-	// Get the TransactionAPI
-	// Pass the ethService itself, as it implements the ethapi.Backend interface
-	// and also provides the IsSimulateMode/SimChainStore methods needed by the simulation check.
-	txAPI := ethapi.NewTransactionAPI(ethService.APIBackend, new(ethapi.AddrLocker))
+// 	// Get the TransactionAPI
+// 	// Pass the ethService itself, as it implements the ethapi.Backend interface
+// 	// and also provides the IsSimulateMode/SimChainStore methods needed by the simulation check.
+// 	txAPI := ethapi.NewTransactionAPI(ethService.APIBackend, new(ethapi.AddrLocker))
 
-	// Call SendRawTransaction, which uses simulateAndStore internally in simulate mode
-	txHash, err := txAPI.SendRawTransaction(ctx, rlpTx)
+// 	// Call SendRawTransaction, which uses simulateAndStore internally in simulate mode
+// 	txHash, err := txAPI.SendRawTransaction(ctx, rlpTx)
 
-	assert.NoError(t, err)
-	assert.Equal(t, signedTx.Hash(), txHash, "SendRawTransaction should return the correct hash")
+// 	assert.NoError(t, err)
+// 	assert.Equal(t, signedTx.Hash(), txHash, "SendRawTransaction should return the correct hash")
 
-	// Assertions checking the simStore remain the same
-	simStore := ethService.SimChainStore()
-	require.NotNil(t, simStore, "SimChainStore should not be nil")
+// 	// Assertions checking the simStore remain the same
+// 	simStore := ethService.SimChainStore()
+// 	require.NotNil(t, simStore, "SimChainStore should not be nil")
 
-	txFromStore, _ := simStore.GetTransaction(signedTx.Hash())
-	assert.NotNil(t, txFromStore, "transaction should be stored in SimChainStore")
+// 	txFromStore, _ := simStore.GetTransaction(signedTx.Hash())
+// 	assert.NotNil(t, txFromStore, "transaction should be stored in SimChainStore")
 
-	receiptFromStore, _ := simStore.GetReceipt(signedTx.Hash())
-	assert.NotNil(t, receiptFromStore, "receipt should be stored in SimChainStore")
+// 	receiptFromStore, _ := simStore.GetReceipt(signedTx.Hash())
+// 	assert.NotNil(t, receiptFromStore, "receipt should be stored in SimChainStore")
 
-	// blockFromStore, _ := simStore.GetBlockByHash(receiptFromStore.BlockHash)
-	// assert.NotNil(t, blockFromStore, "block should be stored in SimChainStore")
+// 	// blockFromStore, _ := simStore.GetBlockByHash(receiptFromStore.BlockHash)
+// 	// assert.NotNil(t, blockFromStore, "block should be stored in SimChainStore")
 
-	uAmount, _ := uint256.FromBig(big.NewInt(0))
-	accountState := simStore.GetAccount(senderAddr)
-	assert.NotNil(t, accountState, "sender account state should be bigger than 0")
-	assert.True(t, accountState.Balance.Cmp(uAmount) > 0, "balance should be reduced")
+// 	uAmount, _ := uint256.FromBig(big.NewInt(0))
+// 	accountState := simStore.GetAccount(senderAddr)
+// 	assert.NotNil(t, accountState, "sender account state should be bigger than 0")
+// 	assert.True(t, accountState.Balance.Cmp(uAmount) > 0, "balance should be reduced")
 
-	accountStateRecipient := simStore.GetAccount(recipientAddr)
-	assert.NotNil(t, accountStateRecipient, "recipient account state should be stored in SimChainStore")
+// 	accountStateRecipient := simStore.GetAccount(recipientAddr)
+// 	assert.NotNil(t, accountStateRecipient, "recipient account state should be stored in SimChainStore")
 
-	zAmount, _ := uint256.FromBig(big.NewInt(0))
-	assert.True(t, accountStateRecipient.Balance.Cmp(zAmount) > 0, "recipient should have received funds")
+// 	zAmount, _ := uint256.FromBig(big.NewInt(0))
+// 	assert.True(t, accountStateRecipient.Balance.Cmp(zAmount) > 0, "recipient should have received funds")
 
-}
+// }
 
 // TestEventTracer test if the event tracer works and collect the logs and generate the new custom structure correctly
 

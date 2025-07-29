@@ -58,8 +58,8 @@ cmd/rlpdump/rlpdump
 cmd/workload/workload
 cmd/geth/__debug_bin*
 
-# local config used by the clique_config/datadir
-clique_config/
+genesis_config/
+
 datadir/
 
 flow_protect_user.md

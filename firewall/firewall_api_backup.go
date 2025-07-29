@@ -14,7 +14,7 @@
 // // You should have received a copy of the GNU Lesser General Public License
 // // along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
-// package Firewall
+package firewall
 
 // import (
 // 	"errors"
@@ -479,4 +479,4 @@
 // 	// 3. Return the BlockGen object containing the final state and list of
 // 	// transactions that passed validation. The caller can then build the final block.
 // 	return blockGen, nil
-// }
+//

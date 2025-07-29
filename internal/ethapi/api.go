@@ -316,23 +316,23 @@ func (api *BlockChainAPI) ChainId() *hexutil.Big {
 
 // BlockNumber returns the block number of the chain head.
 func (api *BlockChainAPI) BlockNumber() hexutil.Uint64 {
-	if simB, ok := api.b.(interface {
-		SimChainStore() *state.SimulatedChainStore
-		IsSimulateMode() bool
-	}); ok && simB.IsSimulateMode() {
-		// check in the local store
-		simStore := simB.SimChainStore()
-		block, ok := simStore.GetLatestBlock()
-		if !ok {
-			log.Error("latest block is nil")
-			return 0
-		}
-		return hexutil.Uint64(block.NumberU64())
-	} else {
-		header, _ := api.b.HeaderByNumber(context.Background(), rpc.LatestBlockNumber) // latest header should always be available
-		return hexutil.Uint64(header.Number.Uint64())
+	// if simB, ok := api.b.(interface {
+	// 	SimChainStore() *state.SimulatedChainStore
+	// 	IsSimulateMode() bool
+	// }); ok && simB.IsSimulateMode() {
+	// 	// check in the local store
+	// 	simStore := simB.SimChainStore()
+	// 	block, ok := simStore.GetLatestBlock()
+	// 	if !ok {
+	// 		log.Error("latest block is nil")
+	// 		return 0
+	// 	}
+	// 	return hexutil.Uint64(block.NumberU64())
+	// }
 
-	}
+	header, _ := api.b.HeaderByNumber(context.Background(), rpc.LatestBlockNumber) // latest header should always be available
+	return hexutil.Uint64(header.Number.Uint64())
+
 }
 
 // GetBalance returns the amount of wei for the given address in the state of the
@@ -528,15 +528,15 @@ func (api *BlockChainAPI) GetBlockByNumber(ctx context.Context, number rpc.Block
 // detail, otherwise only the transaction hash is returned.
 func (api *BlockChainAPI) GetBlockByHash(ctx context.Context, hash common.Hash, fullTx bool) (map[string]interface{}, error) {
 	// Simulated mode check
-	if simB, ok := api.b.(interface {
-		SimChainStore() *state.SimulatedChainStore
-		IsSimulateMode() bool
-	}); ok && simB.IsSimulateMode() {
-		// NOT MANAGED BY SIMULATED CHAIN STORE
-		// use tx hash instead
-		return RPCMarshalBlock(nil, true, fullTx, api.b.ChainConfig()), nil
+	// if simB, ok := api.b.(interface {
+	// 	SimChainStore() *state.SimulatedChainStore
+	// 	IsSimulateMode() bool
+	// }); ok && simB.IsSimulateMode() {
+	// 	// NOT MANAGED BY SIMULATED CHAIN STORE
+	// 	// use tx hash instead
+	// 	return RPCMarshalBlock(nil, true, fullTx, api.b.ChainConfig()), nil
 
-	}
+	// }
 	// regular logic
 	block, err := api.b.BlockByHash(ctx, hash)
 	// regulare logic
@@ -841,7 +841,6 @@ func (api *BlockChainAPI) SimulateV1(ctx context.Context, opts simOpts, blockNrO
 // used in solo mining in combination with the simulation store
 func (api *BlockChainAPI) SimulateV1IPSP(ctx context.Context, opts simOpts, blockNrOrHash *rpc.BlockNumberOrHash) ([]*state.SimBlockResult, error) {
 	if simB, ok := api.b.(interface {
-		SimChainStore() *state.SimulatedChainStore
 		IsSimulateMode() bool
 	}); ok && simB.IsSimulateMode() {
 		if len(opts.BlockStateCalls) == 0 {
@@ -1492,29 +1491,29 @@ func (api *TransactionAPI) GetTransactionCount(ctx context.Context, address comm
 func (api *TransactionAPI) GetTransactionByHash(ctx context.Context, hash common.Hash) (*RPCTransaction, error) {
 
 	// Check simulated store first if simulate-mode is on
-	if simB, ok := api.b.(interface {
-		SimChainStore() *state.SimulatedChainStore
-		IsSimulateMode() bool
-	}); ok && simB.IsSimulateMode() {
-		simStore := simB.SimChainStore()
-		if simStore != nil {
-			// Try to retrieve the transaction directly from the SimChainStore
-			if tx, found := simStore.GetTransaction(hash); found {
-				// Transaction found in SimChainStore.
-				// Return it as a "pending" transaction, as its block context might
-				// still be under simulation or not yet fully determined.
-				// This mirrors how transactions from the main chain's tx pool are handled.
-				log.Debug("GetTransactionByHash: Found in SimChainStore, returning as pending", "hash", hash)
-				return NewRPCPendingTransaction(tx, api.b.CurrentHeader(), api.b.ChainConfig()), nil
-			}
-			// If not found in simStore while in simulate mode, it's considered not found for this context.
-			log.Debug("GetTransactionByHash: Not found in SimChainStore", "hash", hash)
-			return nil, nil // Indicate not found in simulate context
-		}
-		// If simStore is nil but in simulate mode (should ideally not happen if configured correctly)
-		log.Warn("GetTransactionByHash: In simulate mode but SimChainStore is nil", "hash", hash)
-		return nil, fmt.Errorf("in simulate mode but SimChainStore is not available")
-	}
+	// if simB, ok := api.b.(interface {
+	// 	SimChainStore() *state.SimulatedChainStore
+	// 	IsSimulateMode() bool
+	// }); ok && simB.IsSimulateMode() {
+	// 	simStore := simB.SimChainStore()
+	// 	if simStore != nil {
+	// 		// Try to retrieve the transaction directly from the SimChainStore
+	// 		if tx, found := simStore.GetTransaction(hash); found {
+	// 			// Transaction found in SimChainStore.
+	// 			// Return it as a "pending" transaction, as its block context might
+	// 			// still be under simulation or not yet fully determined.
+	// 			// This mirrors how transactions from the main chain's tx pool are handled.
+	// 			log.Debug("GetTransactionByHash: Found in SimChainStore, returning as pending", "hash", hash)
+	// 			return NewRPCPendingTransaction(tx, api.b.CurrentHeader(), api.b.ChainConfig()), nil
+	// 		}
+	// 		// If not found in simStore while in simulate mode, it's considered not found for this context.
+	// 		log.Debug("GetTransactionByHash: Not found in SimChainStore", "hash", hash)
+	// 		return nil, nil // Indicate not found in simulate context
+	// 	}
+	// 	// If simStore is nil but in simulate mode (should ideally not happen if configured correctly)
+	// 	log.Warn("GetTransactionByHash: In simulate mode but SimChainStore is nil", "hash", hash)
+	// 	return nil, fmt.Errorf("in simulate mode but SimChainStore is not available")
+	// }
 
 	// --- Normal flow (not in simulate mode or fell through) ---
 
@@ -1566,18 +1565,18 @@ func (api *TransactionAPI) GetRawTransactionByHash(ctx context.Context, hash com
 
 func (api *TransactionAPI) GetTransactionReceipt(ctx context.Context, hash common.Hash) (map[string]interface{}, error) {
 
-	//  Check simulated store first if simulate-mode is on
-	if simB, ok := api.b.(interface {
-		SimChainStore() *state.SimulatedChainStore
-		IsSimulateMode() bool
-	}); ok && simB.IsSimulateMode() {
-		if receipt, ok := simB.SimChainStore().GetReceipt(hash); ok {
-			if tx, ok := simB.SimChainStore().GetTransaction(hash); ok {
-				signer := types.LatestSignerForChainID(tx.ChainId()) // Simplified
-				return marshalReceipt(receipt, common.Hash{}, 0, signer, tx, 0), nil
-			}
-		}
-	}
+	// //  Check simulated store first if simulate-mode is on
+	// if simB, ok := api.b.(interface {
+	// 	SimChainStore() *state.SimulatedChainStore
+	// 	IsSimulateMode() bool
+	// }); ok && simB.IsSimulateMode() {
+	// 	if receipt, ok := simB.SimChainStore().GetReceipt(hash); ok {
+	// 		if tx, ok := simB.SimChainStore().GetTransaction(hash); ok {
+	// 			signer := types.LatestSignerForChainID(tx.ChainId()) // Simplified
+	// 			return marshalReceipt(receipt, common.Hash{}, 0, signer, tx, 0), nil
+	// 		}
+	// 	}
+	// }
 
 	// Fallback to real chain
 
@@ -2168,17 +2167,17 @@ func simulateAndStore(ctx context.Context, backend Backend, tx *types.Transactio
 }
 
 func (api *TransactionAPI) GetTransactionEventsFromBackend(ctx context.Context, backend Backend, txHash common.Hash) (state.FullTransactionEvents, error) {
-	if simStoreProvider, ok := backend.(interface {
-		SimChainStore() *state.SimulatedChainStore
-		IsSimulateMode() bool // Corrected: Use exported method name
-	}); ok && simStoreProvider.IsSimulateMode() { // Corrected: Call exported method
-		simStore := simStoreProvider.SimChainStore()
-		events, ok := simStore.GetTxEvents(txHash)
-		if !ok {
-			return state.FullTransactionEvents{}, fmt.Errorf("transaction events not found")
-		}
-		return events, nil
-	}
+	// if simStoreProvider, ok := backend.(interface {
+	// 	SimChainStore() *state.SimulatedChainStore
+	// 	IsSimulateMode() bool // Corrected: Use exported method name
+	// }); ok && simStoreProvider.IsSimulateMode() { // Corrected: Call exported method
+	// 	simStore := simStoreProvider.SimChainStore()
+	// 	events, ok := simStore.GetTxEvents(txHash)
+	// 	if !ok {
+	// 		return state.FullTransactionEvents{}, fmt.Errorf("transaction events not found")
+	// 	}
+	// 	return events, nil
+	// }
 	return state.FullTransactionEvents{}, fmt.Errorf("simulation store not found")
 }
 func TransactionArgsFromTransaction(tx *types.Transaction) TransactionArgs {

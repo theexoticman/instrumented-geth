@@ -17,7 +17,6 @@
 package vm
 
 import (
-	"fmt"
 	"math"
 	"os"
 
@@ -523,10 +522,6 @@ func opSload(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]by
 	val := interpreter.evm.StateDB.GetState(scope.Contract.Address(), hash)
 	loc.SetBytes(val.Bytes())
 
-	fmt.Println("opSload")
-	fmt.Println("addr", scope.Contract.Address().Hex())
-	fmt.Println("hash", hash.Hex())
-	fmt.Println("val", val)
 	os.Stdout.Sync()
 
 	return nil, nil
