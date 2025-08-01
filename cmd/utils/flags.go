@@ -961,10 +961,12 @@ Please note that --` + MetricsHTTPFlag.Name + ` must be set to start the server.
 		Value:    metrics.DefaultConfig.InfluxDBOrganization,
 		Category: flags.MetricsCategory,
 	}
+
 	SimulateModeFlag = &cli.BoolFlag{
 		Name:  "simulate-mode",
 		Usage: "Intercept eth_sendTransaction and simulate it locally, with local mining, instead of broadcasting to the network",
 	}
+
 	ExternalRPCFlag = &cli.StringFlag{
 		Name:  "external-rpc",
 		Usage: "External RPC endpoint to forward filtered transactions (required in simulate mode)",
@@ -1882,11 +1884,11 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	}
 
 	// Add this back to setEthConfig function
-	if ctx.Bool(SimulateModeFlag.Name) {
+	if ctx.IsSet(SimulateModeFlag.Name) {
 		cfg.SimulateMode = true
-		if ctx.String(ExternalRPCFlag.Name) != "" {
-			cfg.ExternalRPC = ctx.String(ExternalRPCFlag.Name)
-		}
+	}
+	if ctx.IsSet(ExternalRPCFlag.Name) && ctx.String(ExternalRPCFlag.Name) != "" {
+		cfg.ExternalRPC = ctx.String(ExternalRPCFlag.Name)
 	}
 }
 
