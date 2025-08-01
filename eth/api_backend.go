@@ -493,3 +493,7 @@ func (b *EthAPIBackend) GetTransactionEvents(ctx context.Context, hash common.Ha
 	// PoC Stub for non-simulate path
 	return nil, fmt.Errorf("GetTransactionEvents on EthAPIBackend: non-simulate mode path is a stub for PoC")
 }
+
+func (b *EthAPIBackend) GetResponseManager() interface{} {
+	return b.eth.responseManager
+}

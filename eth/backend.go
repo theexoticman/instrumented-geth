@@ -18,6 +18,7 @@
 package eth
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -47,6 +48,7 @@ import (
 	"github.com/ethereum/go-ethereum/eth/protocols/eth"
 	"github.com/ethereum/go-ethereum/eth/protocols/snap"
 	"github.com/ethereum/go-ethereum/eth/tracers"
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/internal/ethapi"
@@ -68,7 +70,220 @@ import (
 // Deprecated: use ethconfig.Config instead.
 type Config = ethconfig.Config
 
-// Ethereum implements the Ethereum full node service.
+// FirewallAPIWrapper wraps the ethapi.FirewallAPI to match the miner.FirewallAPI interface
+type FirewallAPIWrapper struct {
+	api *ethapi.FirewallAPI
+}
+
+func (w *FirewallAPIWrapper) SimulateBlock(ctx context.Context, args interface{}) (interface{}, error) {
+	// Convert the args to the proper type
+	firewallArgs, ok := args.(ethapi.FirewallAPIArgs)
+	if !ok {
+		// Try to convert from the inline struct we created in worker.go
+		if argsMap, ok := args.(struct {
+			ParentBlockHash interface{}                                 `json:"parentBlockHash"`
+			Timestamp       hexutil.Uint64                              `json:"timestamp"`
+			Transactions    []hexutil.Bytes                             `json:"transactions"`
+			Checkpoints     map[common.Hash]state.FullTransactionEvents `json:"checkpoints"`
+		}); ok {
+			// Type assert ParentBlockHash to the correct type
+			parentBlockHash, ok := argsMap.ParentBlockHash.(rpc.BlockNumberOrHash)
+			if !ok {
+				return nil, fmt.Errorf("invalid ParentBlockHash type")
+			}
+
+			firewallArgs = ethapi.FirewallAPIArgs{
+				ParentBlockHash: parentBlockHash,
+				Timestamp:       argsMap.Timestamp,
+				Transactions:    argsMap.Transactions,
+				Checkpoints:     argsMap.Checkpoints,
+			}
+		} else {
+			return nil, fmt.Errorf("invalid arguments type for firewall API")
+		}
+	}
+
+	result, err := w.api.SimulateBlock(ctx, firewallArgs)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert the result to a map[string]interface{} to avoid import cycles
+	return map[string]interface{}{
+		"includedTxs": result.IncludedTxs,
+		"droppedTxs":  result.DroppedTxs,
+		"gasUsed":     result.GasUsed,
+		"stateRoot":   result.StateRoot,
+	}, nil
+}
+
+// SimulationResponseManager handles pending transaction responses in simulate mode
+type SimulationResponseManager struct {
+	mu               sync.RWMutex
+	pendingResponses map[common.Hash]chan *SimulationResponse
+	timeout          time.Duration
+}
+
+type SimulationResponse struct {
+	TxHash common.Hash `json:"txHash"`
+	Status string      `json:"status"` // "success", "failed", "protected"
+	Reason string      `json:"reason,omitempty"`
+	Result interface{} `json:"result,omitempty"`
+}
+
+func NewSimulationResponseManager() *SimulationResponseManager {
+	return &SimulationResponseManager{
+		pendingResponses: make(map[common.Hash]chan *SimulationResponse),
+		timeout:          30 * time.Second, // 30s timeout for responses
+	}
+}
+
+func (srm *SimulationResponseManager) AddPendingTx(txHash common.Hash) chan *SimulationResponse {
+	srm.mu.Lock()
+	defer srm.mu.Unlock()
+
+	respChan := make(chan *SimulationResponse, 1)
+	srm.pendingResponses[txHash] = respChan
+
+	// Set timeout to clean up abandoned responses
+	go func() {
+		timer := time.NewTimer(srm.timeout)
+		defer timer.Stop()
+
+		select {
+		case <-timer.C:
+			srm.mu.Lock()
+			delete(srm.pendingResponses, txHash)
+			srm.mu.Unlock()
+			close(respChan)
+		case <-respChan:
+			// Response sent, cleanup handled elsewhere
+		}
+	}()
+
+	return respChan
+}
+
+func (srm *SimulationResponseManager) SendResponse(txHash common.Hash, response *SimulationResponse) {
+	srm.mu.Lock()
+	defer srm.mu.Unlock()
+
+	if respChan, exists := srm.pendingResponses[txHash]; exists {
+		select {
+		case respChan <- response:
+		default:
+			// Channel full or closed, ignore
+		}
+		delete(srm.pendingResponses, txHash)
+		close(respChan)
+	}
+}
+
+// Add these type definitions after line 132
+type SimulationResult struct {
+	IncludedTxs []*types.Transaction
+	DroppedTxs  []*ethapi.DroppedTxInfo
+}
+
+type generateParams struct {
+	timestamp  uint64
+	parentHash common.Hash
+	coinbase   common.Address
+	noTxs      bool
+}
+
+// Add missing methods at the end of the file
+func (s *Ethereum) sendTransactionsToExternalRPC(txs []*types.Transaction) error {
+	if s.externalRPCClient == nil {
+		return fmt.Errorf("external RPC client not configured")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Send each transaction to the external node via eth_sendRawTransaction
+	var wg sync.WaitGroup
+	successHashes := make([]common.Hash, 0, len(txs))
+	var mu sync.Mutex
+
+	for _, tx := range txs {
+		wg.Add(1)
+		go func(tx *types.Transaction) {
+			defer wg.Done()
+
+			// This calls eth_sendRawTransaction on the external node
+			err := s.externalRPCClient.SendTransaction(ctx, tx)
+			if err != nil {
+				log.Warn("Failed to send transaction to external RPC",
+					"hash", tx.Hash(), "err", err)
+
+				// Send failure response to original client
+				s.responseManager.SendResponse(tx.Hash(), &SimulationResponse{
+					TxHash: tx.Hash(),
+					Status: "failed",
+					Reason: fmt.Sprintf("External RPC rejected: %v", err),
+				})
+			} else {
+				log.Info("Transaction forwarded to external RPC", "hash", tx.Hash())
+
+				mu.Lock()
+				successHashes = append(successHashes, tx.Hash())
+				mu.Unlock()
+
+				// Send success response to original client
+				s.responseManager.SendResponse(tx.Hash(), &SimulationResponse{
+					TxHash: tx.Hash(),
+					Status: "success",
+					Result: tx.Hash().Hex(),
+				})
+			}
+		}(tx)
+	}
+
+	wg.Wait()
+
+	log.Info("Batch forwarding completed",
+		"total", len(txs),
+		"successful", len(successHashes))
+
+	return nil
+}
+
+func (s *Ethereum) sendResponsesForCycle(result *SimulationResult) {
+	// Send responses for dropped transactions
+	for _, droppedInfo := range result.DroppedTxs {
+		s.responseManager.SendResponse(droppedInfo.Hash, &SimulationResponse{
+			TxHash: droppedInfo.Hash,
+			Status: "protected",
+			Reason: fmt.Sprintf("IntentGuard protected you: %s", droppedInfo.Reason),
+		})
+	}
+
+	log.Debug("Sent responses for simulation cycle",
+		"successful", len(result.IncludedTxs),
+		"protected", len(result.DroppedTxs))
+}
+
+// Add methods to support the transaction pool API
+func (s *Ethereum) IsSimulateMode() bool {
+	return s.isSimulateMode
+}
+
+func (s *Ethereum) GetResponseManager() *SimulationResponseManager {
+	return s.responseManager
+}
+
+// Add simulation statistics tracking
+type SimulationStats struct {
+	TotalCycles   uint64
+	TotalTxs      uint64
+	SuccessfulTxs uint64
+	ProtectedTxs  uint64
+	FailedTxs     uint64
+	LastCycleTime time.Time
+}
+
+// Add to Ethereum struct
 type Ethereum struct {
 	// core protocol objects
 	config         *ethconfig.Config
@@ -108,6 +323,13 @@ type Ethereum struct {
 	isSimulateMode   bool
 	simStore         *state.SimulatedChainStore
 	txSimulationPool *firewall.TxSimulationPool
+
+	// Simulation loop fields (new)
+	simulationTicker  *time.Ticker
+	simulationStop    chan struct{}
+	externalRPCClient *ethclient.Client
+	responseManager   *SimulationResponseManager
+	simulationStats   *SimulationStats
 }
 
 // New creates a new Ethereum object (including the initialisation of the common Ethereum object),
@@ -184,6 +406,18 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	if config.SimulateMode {
 		// eth.simStore = state.NewSimulatedChainStore()
 		eth.txSimulationPool = firewall.NewTxSimulationPool()
+		eth.responseManager = NewSimulationResponseManager()
+		eth.simulationStats = &SimulationStats{}
+
+		// Initialize external RPC client if provided
+		if config.ExternalRPC != "" {
+			client, err := ethclient.Dial(config.ExternalRPC)
+			if err != nil {
+				return nil, fmt.Errorf("failed to connect to external RPC: %v", err)
+			}
+			eth.externalRPCClient = client
+			log.Info("Connected to external RPC", "endpoint", config.ExternalRPC)
+		}
 	}
 	bcVersion := rawdb.ReadDatabaseVersion(chainDb)
 	var dbVer = "<nil>"
@@ -306,10 +540,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 
 	eth.dropper = newDropper(eth.p2pServer.MaxDialedConns(), eth.p2pServer.MaxInboundConns())
 
-	eth.miner = miner.New(eth, config.Miner, eth.engine)
-	eth.miner.SetExtra(makeExtraData(config.Miner.ExtraData))
-	eth.miner.SetPrioAddresses(config.TxPool.Locals)
-
+	// Move APIBackend creation BEFORE miner creation
 	eth.APIBackend = &EthAPIBackend{
 		extRPCEnabled:         stack.Config().ExtRPCEnabled(),
 		allowUnprotectedTxs:   stack.Config().AllowUnprotectedTxs,
@@ -319,6 +550,21 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		IsSimulateModeEnabled: eth.isSimulateMode,
 		txSimulationPool:      eth.txSimulationPool,
 	}
+
+	// THEN create the miner (which now can access the APIBackend)
+	eth.miner = miner.New(eth, &miner.Config{
+		Etherbase:           config.Miner.Etherbase,
+		PendingFeeRecipient: config.Miner.PendingFeeRecipient,
+		ExtraData:           config.Miner.ExtraData,
+		GasCeil:             config.Miner.GasCeil,
+		GasPrice:            config.Miner.GasPrice,
+		Recommit:            config.Miner.Recommit,
+		ExternalRPC:         config.Miner.ExternalRPC,
+	}, eth.engine, &FirewallAPIWrapper{api: ethapi.NewFirewallAPI(eth.APIBackend)})
+	eth.miner.SetExtra(makeExtraData(config.Miner.ExtraData))
+	eth.miner.SetPrioAddresses(config.TxPool.Locals)
+
+	// Set the gas price oracle (which depends on APIBackend existing)
 	if eth.APIBackend.allowUnprotectedTxs {
 		log.Info("Unprotected transactions allowed")
 	}
@@ -358,7 +604,15 @@ func makeExtraData(extra []byte) []byte {
 // APIs return the collection of RPC services the ethereum package offers.
 // NOTE, some of these services probably need to be moved to somewhere else.
 func (s *Ethereum) APIs() []rpc.API {
+	// Get base APIs but modify transaction handling for simulate mode
 	apis := ethapi.GetAPIs(s.APIBackend)
+
+	// If in simulate mode, we need to modify the transaction pool API
+	if s.isSimulateMode {
+		log.Info("Running in simulate mode - transaction interception enabled")
+		// The transaction pool API will automatically detect simulate mode
+		// through the IsSimulateMode() method we added
+	}
 
 	// Append any APIs exposed explicitly by the consensus engine
 	apis = append(apis, s.engine.APIs(s.BlockChain())...)
@@ -383,6 +637,9 @@ func (s *Ethereum) APIs() []rpc.API {
 		}, {
 			Namespace: "firewall",
 			Service:   ethapi.NewFirewallAPI(s.APIBackend),
+		}, {
+			Namespace: "simulate",
+			Service:   NewSimulateAPI(s), // Add simulation-specific API
 		},
 	}...)
 }
@@ -433,6 +690,11 @@ func (s *Ethereum) Start() error {
 	// start log indexer
 	s.filterMaps.Start()
 	go s.updateFilterMapsHeads()
+
+	if s.isSimulateMode && s.externalRPCClient != nil {
+		go s.startSimulationLoop()
+	}
+
 	return nil
 }
 
@@ -549,6 +811,18 @@ func (s *Ethereum) Stop() error {
 	s.chainDb.Close()
 	s.eventMux.Stop()
 
+	if s.simulationStop != nil {
+		close(s.simulationStop)
+		s.simulationStop = nil
+	}
+	if s.simulationTicker != nil {
+		s.simulationTicker.Stop()
+		s.simulationTicker = nil
+	}
+	if s.externalRPCClient != nil {
+		s.externalRPCClient.Close()
+	}
+
 	return nil
 }
 
@@ -584,18 +858,169 @@ func (s *Ethereum) EnableSimulateMode() {
 func (s *Ethereum) DisableSimulateMode() {
 	s.isSimulateMode = false
 }
-func (s *Ethereum) IsSimulateMode() bool {
-	return s.isSimulateMode
-}
 
 func (e *Ethereum) SimChainStore() *state.SimulatedChainStore {
 	return e.simStore
 }
 
-func (e *Ethereum) TxSimulationPool() *firewall.TxSimulationPool {
+func (e *Ethereum) TxSimulationPool() interface{} {
 	return e.txSimulationPool
 }
 
 func (b *EthAPIBackend) TxSimulationPool() *firewall.TxSimulationPool {
 	return b.txSimulationPool
+}
+
+// startSimulationLoop runs the 12s simulation cycle (6s collect + 6s simulate/send)
+func (s *Ethereum) startSimulationLoop() {
+	log.Info("Starting simulation loop, waiting for node to sync...")
+
+	// Wait for node to be fully synced
+	for !s.Synced() {
+		time.Sleep(1 * time.Second)
+	}
+
+	log.Info("Node synced, starting simulation timer")
+
+	// Start 12s ticker (6s collect + 6s simulate/send)
+	s.simulationTicker = time.NewTicker(12 * time.Second)
+	s.simulationStop = make(chan struct{})
+
+	defer func() {
+		if s.simulationTicker != nil {
+			s.simulationTicker.Stop()
+		}
+		if s.simulationStop != nil {
+			close(s.simulationStop)
+		}
+	}()
+
+	for {
+		select {
+		case <-s.simulationTicker.C:
+			// Wait 6s for transaction collection
+			log.Debug("Simulation cycle: collecting transactions for 6s...")
+			time.Sleep(6 * time.Second)
+
+			// Now simulate and send in remaining time
+			log.Debug("Simulation cycle: starting simulation and forwarding...")
+			if err := s.runSimulationCycle(); err != nil {
+				log.Error("Simulation cycle failed", "err", err)
+			}
+
+		case <-s.simulationStop:
+			log.Info("Simulation loop stopped")
+			return
+		}
+	}
+}
+
+// runSimulationCycle performs one complete simulation cycle
+func (s *Ethereum) runSimulationCycle() error {
+	start := time.Now()
+	defer func() {
+		s.simulationStats.LastCycleTime = time.Now()
+		s.simulationStats.TotalCycles++
+	}()
+
+	// 1. Lock the txpool during simulation
+	if err := s.txPool.Sync(); err != nil {
+		return fmt.Errorf("failed to sync txpool: %v", err)
+	}
+
+	// 2. Create simulation environment using miner logic
+	result, err := s.runTransactionSimulation()
+	if err != nil {
+		log.Error("Transaction simulation failed", "err", err)
+		// Clear txpool even on error
+		s.txPool.Clear()
+		return err
+	}
+
+	// 3. Send successful transactions to external RPC
+	if len(result.IncludedTxs) > 0 {
+		if err := s.sendTransactionsToExternalRPC(result.IncludedTxs); err != nil {
+			log.Error("Failed to send transactions to external RPC", "err", err)
+		}
+	}
+
+	// 4. Send responses to waiting clients
+	s.sendResponsesForCycle(result)
+
+	// 5. Clear the txpool for next cycle
+	s.txPool.Clear()
+
+	log.Info("Simulation cycle completed",
+		"included", len(result.IncludedTxs),
+		"protected", len(result.DroppedTxs),
+		"duration", time.Since(start),
+		"total_cycles", s.simulationStats.TotalCycles)
+
+	// Update statistics
+	s.simulationStats.TotalTxs += uint64(len(result.IncludedTxs) + len(result.DroppedTxs))
+	s.simulationStats.SuccessfulTxs += uint64(len(result.IncludedTxs))
+	s.simulationStats.ProtectedTxs += uint64(len(result.DroppedTxs))
+
+	return nil
+}
+
+// runTransactionSimulation performs the actual simulation using miner logic
+func (s *Ethereum) runTransactionSimulation() (*SimulationResult, error) {
+	// Create a pseudo-environment like the miner does
+	parent := s.blockchain.CurrentBlock()
+	timestamp := uint64(time.Now().Unix())
+
+	genParams := &generateParams{
+		timestamp:  timestamp,
+		parentHash: parent.Hash(),
+		coinbase:   common.Address{}, // Simulation coinbase
+		noTxs:      false,
+	}
+
+	// Use miner's prepareWork to create environment
+	env, err := s.miner.PrepareSimulationWork(&miner.GenerateParams{
+		Timestamp:  genParams.timestamp,
+		ParentHash: genParams.parentHash,
+		Coinbase:   genParams.coinbase,
+		NoTxs:      genParams.noTxs,
+	}, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare simulation environment: %v", err)
+	}
+
+	// Use the new simulation version of fillTransactions
+	if err := s.miner.FillTransactionsSimulateMode(nil, env); err != nil {
+		return nil, fmt.Errorf("failed to simulate transactions: %v", err)
+	}
+
+	// Extract results from environment
+	return &SimulationResult{
+		IncludedTxs: env.GetTransactions(),
+		DroppedTxs:  env.GetDroppedTxs(),
+	}, nil
+}
+
+// Add new Simulate API for monitoring
+type SimulateAPI struct {
+	eth *Ethereum
+}
+
+func NewSimulateAPI(eth *Ethereum) *SimulateAPI {
+	return &SimulateAPI{eth: eth}
+}
+
+func (api *SimulateAPI) GetStats() map[string]interface{} {
+	if !api.eth.isSimulateMode {
+		return map[string]interface{}{"error": "not in simulate mode"}
+	}
+
+	stats := api.eth.simulationStats
+	return map[string]interface{}{
+		"totalCycles":   stats.TotalCycles,
+		"totalTxs":      stats.TotalTxs,
+		"successfulTxs": stats.SuccessfulTxs,
+		"protectedTxs":  stats.ProtectedTxs,
+		"lastCycleTime": stats.LastCycleTime,
+		"simulateMode":  true,
+	}
 }

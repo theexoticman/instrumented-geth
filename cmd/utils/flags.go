@@ -965,6 +965,11 @@ Please note that --` + MetricsHTTPFlag.Name + ` must be set to start the server.
 		Name:  "simulate-mode",
 		Usage: "Intercept eth_sendTransaction and simulate it locally, with local mining, instead of broadcasting to the network",
 	}
+	ExternalRPCFlag = &cli.StringFlag{
+		Name:  "external-rpc",
+		Usage: "External RPC endpoint to forward filtered transactions (required in simulate mode)",
+		Value: "",
+	}
 )
 
 var (
@@ -1873,6 +1878,14 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 		if name := ctx.String(VMTraceFlag.Name); name != "" {
 			cfg.VMTrace = name
 			cfg.VMTraceJsonConfig = ctx.String(VMTraceJsonConfigFlag.Name)
+		}
+	}
+
+	// Add this back to setEthConfig function
+	if ctx.Bool(SimulateModeFlag.Name) {
+		cfg.SimulateMode = true
+		if ctx.String(ExternalRPCFlag.Name) != "" {
+			cfg.ExternalRPC = ctx.String(ExternalRPCFlag.Name)
 		}
 	}
 }

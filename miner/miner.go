@@ -18,9 +18,11 @@
 package miner
 
 import (
+	"context"
 	"fmt"
 	"math/big"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -30,6 +32,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/txpool"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/params"
 )
 
@@ -38,6 +41,12 @@ import (
 type Backend interface {
 	BlockChain() *core.BlockChain
 	TxPool() *txpool.TxPool
+	TxSimulationPool() interface{}
+}
+
+// Add a new interface for firewall operations
+type FirewallAPI interface {
+	SimulateBlock(ctx context.Context, args interface{}) (interface{}, error)
 }
 
 // Config is the configuration parameters of mining.
@@ -48,6 +57,7 @@ type Config struct {
 	GasCeil             uint64         // Target gas ceiling for mined blocks.
 	GasPrice            *big.Int       // Minimum gas price for mining a transaction
 	Recommit            time.Duration  // The time interval for miner to re-create mining work.
+	ExternalRPC         string         // External RPC endpoint to forward filtered transactions
 }
 
 // DefaultConfig contains default settings for miner.
@@ -74,16 +84,24 @@ type Miner struct {
 	chain       *core.BlockChain
 	pending     *pending
 	pendingMu   sync.Mutex // Lock protects the pending block
+
+	// Firewall simulation support
+	backend Backend // Keep reference to backend for firewall API access
+
+	// Add firewall API as a field
+	firewallAPI FirewallAPI // Add this field
 }
 
-// New creates a new miner with provided config.
-func New(eth Backend, config Config, engine consensus.Engine) *Miner {
+// New creates a new miner with the provided configuration
+func New(backend Backend, config *Config, engine consensus.Engine, firewallAPI FirewallAPI) *Miner {
 	return &Miner{
-		config:      &config,
-		chainConfig: eth.BlockChain().Config(),
+		config:      config,
+		chainConfig: backend.BlockChain().Config(),
 		engine:      engine,
-		txpool:      eth.TxPool(),
-		chain:       eth.BlockChain(),
+		txpool:      backend.TxPool(),
+		chain:       backend.BlockChain(), // ← ADD THIS LINE
+		backend:     backend,
+		firewallAPI: firewallAPI,
 		pending:     &pending{},
 	}
 }
@@ -155,19 +173,54 @@ func (miner *Miner) getPending() *newPayloadResult {
 	if miner.chainConfig.IsShanghai(new(big.Int).Add(header.Number, big.NewInt(1)), timestamp) {
 		withdrawal = []*types.Withdrawal{}
 	}
-	ret := miner.generateWork(&generateParams{
-		timestamp:   timestamp,
-		forceTime:   false,
-		parentHash:  header.Hash(),
-		coinbase:    miner.config.PendingFeeRecipient,
-		random:      common.Hash{},
-		withdrawals: withdrawal,
-		beaconRoot:  nil,
-		noTxs:       false,
+	ret := miner.generateWork(&GenerateParams{
+		Timestamp:   timestamp,
+		ForceTime:   false,
+		ParentHash:  header.Hash(),
+		Coinbase:    miner.config.PendingFeeRecipient,
+		Random:      common.Hash{},
+		Withdrawals: withdrawal,
+		BeaconRoot:  nil,
+		NoTxs:       false,
 	}, false) // we will never make a witness for a pending block
 	if ret.err != nil {
 		return nil
 	}
 	miner.pending.update(header.Hash(), ret)
 	return ret
+}
+
+// Add these public methods for simulation mode
+func (miner *Miner) PrepareSimulationWork(genParams *GenerateParams, witness bool) (*Environment, error) {
+	return miner.prepareWork(genParams, witness)
+}
+
+func (miner *Miner) FillTransactionsSimulateMode(interrupt *atomic.Int32, env *Environment) error {
+	return miner.fillTransactionsSimulateMode(interrupt, env)
+}
+
+// Add these type aliases to make them accessible
+
+type Environment = environment
+
+// Make the generateParams fields public
+type GenerateParams struct {
+	Timestamp   uint64            // Make public
+	ParentHash  common.Hash       // Make public
+	Coinbase    common.Address    // Make public
+	NoTxs       bool              // Make public
+	ForceTime   bool              // Make public
+	Withdrawals types.Withdrawals // Make public
+	BeaconRoot  *common.Hash      // Make public
+	Random      common.Hash       // Make public
+}
+
+// Add accessor methods
+func (env *Environment) GetTransactions() []*types.Transaction {
+	return env.txs
+}
+
+func (env *Environment) GetDroppedTxs() []*ethapi.DroppedTxInfo {
+	// This will be populated by the fillTransactionsSimulateMode
+	return nil // For now
 }

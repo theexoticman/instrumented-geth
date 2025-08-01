@@ -210,15 +210,15 @@ func (miner *Miner) buildPayload(args *BuildPayloadArgs, witness bool) (*Payload
 	// Build the initial version with no transaction included. It should be fast
 	// enough to run. The empty payload can at least make sure there is something
 	// to deliver for not missing slot.
-	emptyParams := &generateParams{
-		timestamp:   args.Timestamp,
-		forceTime:   true,
-		parentHash:  args.Parent,
-		coinbase:    args.FeeRecipient,
-		random:      args.Random,
-		withdrawals: args.Withdrawals,
-		beaconRoot:  args.BeaconRoot,
-		noTxs:       true,
+	emptyParams := &GenerateParams{
+		Timestamp:   args.Timestamp,
+		ForceTime:   true,
+		ParentHash:  args.Parent,
+		Coinbase:    args.FeeRecipient,
+		Random:      args.Random,
+		Withdrawals: args.Withdrawals,
+		BeaconRoot:  args.BeaconRoot,
+		NoTxs:       true,
 	}
 	empty := miner.generateWork(emptyParams, witness)
 	if empty.err != nil {
@@ -240,15 +240,15 @@ func (miner *Miner) buildPayload(args *BuildPayloadArgs, witness bool) (*Payload
 		// by the timestamp parameter.
 		endTimer := time.NewTimer(time.Second * 12)
 
-		fullParams := &generateParams{
-			timestamp:   args.Timestamp,
-			forceTime:   true,
-			parentHash:  args.Parent,
-			coinbase:    args.FeeRecipient,
-			random:      args.Random,
-			withdrawals: args.Withdrawals,
-			beaconRoot:  args.BeaconRoot,
-			noTxs:       false,
+		fullParams := &GenerateParams{
+			Timestamp:   args.Timestamp,
+			ForceTime:   true,
+			ParentHash:  args.Parent,
+			Coinbase:    args.FeeRecipient,
+			Random:      args.Random,
+			Withdrawals: args.Withdrawals,
+			BeaconRoot:  args.BeaconRoot,
+			NoTxs:       false,
 		}
 
 		for {

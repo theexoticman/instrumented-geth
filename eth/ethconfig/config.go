@@ -164,6 +164,7 @@ type Config struct {
 	OverrideVerkle *uint64 `toml:",omitempty"`
 
 	SimulateMode bool
+	ExternalRPC  string `toml:",omitempty"` // Add this line
 }
 
 // CreateConsensusEngine creates a consensus engine for the given chain config.

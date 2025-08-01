@@ -17,6 +17,7 @@
 package miner
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math/big"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	"github.com/ethereum/go-ethereum/core"
@@ -32,7 +34,10 @@ import (
 	"github.com/ethereum/go-ethereum/core/txpool"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/holiman/uint256"
 )
 
@@ -93,12 +98,12 @@ type generateParams struct {
 }
 
 // generateWork generates a sealing block based on the given parameters.
-func (miner *Miner) generateWork(params *generateParams, witness bool) *newPayloadResult {
+func (miner *Miner) generateWork(params *GenerateParams, witness bool) *newPayloadResult {
 	work, err := miner.prepareWork(params, witness)
 	if err != nil {
 		return &newPayloadResult{err: err}
 	}
-	if !params.noTxs {
+	if !params.NoTxs {
 		interrupt := new(atomic.Int32)
 		timer := time.AfterFunc(miner.config.Recommit, func() {
 			interrupt.Store(commitInterruptTimeout)
@@ -111,7 +116,7 @@ func (miner *Miner) generateWork(params *generateParams, witness bool) *newPaylo
 		}
 	}
 
-	body := types.Body{Transactions: work.txs, Withdrawals: params.withdrawals}
+	body := types.Body{Transactions: work.txs, Withdrawals: params.Withdrawals}
 	allLogs := make([]*types.Log, 0)
 	for _, r := range work.receipts {
 		allLogs = append(allLogs, r.Logs...)
@@ -157,14 +162,14 @@ func (miner *Miner) generateWork(params *generateParams, witness bool) *newPaylo
 // prepareWork constructs the sealing task according to the given parameters,
 // either based on the last chain head or specified parent. In this function
 // the pending transactions are not filled yet, only the empty task returned.
-func (miner *Miner) prepareWork(genParams *generateParams, witness bool) (*environment, error) {
+func (miner *Miner) prepareWork(genParams *GenerateParams, witness bool) (*environment, error) {
 	miner.confMu.RLock()
 	defer miner.confMu.RUnlock()
 
 	// Find the parent block for sealing task
 	parent := miner.chain.CurrentBlock()
-	if genParams.parentHash != (common.Hash{}) {
-		block := miner.chain.GetBlockByHash(genParams.parentHash)
+	if genParams.ParentHash != (common.Hash{}) {
+		block := miner.chain.GetBlockByHash(genParams.ParentHash)
 		if block == nil {
 			return nil, errors.New("missing parent")
 		}
@@ -172,9 +177,9 @@ func (miner *Miner) prepareWork(genParams *generateParams, witness bool) (*envir
 	}
 	// Sanity check the timestamp correctness, recap the timestamp
 	// to parent+1 if the mutation is allowed.
-	timestamp := genParams.timestamp
+	timestamp := genParams.Timestamp
 	if parent.Time >= timestamp {
-		if genParams.forceTime {
+		if genParams.ForceTime {
 			return nil, fmt.Errorf("invalid timestamp, parent %d given %d", parent.Time, timestamp)
 		}
 		timestamp = parent.Time + 1
@@ -185,15 +190,15 @@ func (miner *Miner) prepareWork(genParams *generateParams, witness bool) (*envir
 		Number:     new(big.Int).Add(parent.Number, common.Big1),
 		GasLimit:   core.CalcGasLimit(parent.GasLimit, miner.config.GasCeil),
 		Time:       timestamp,
-		Coinbase:   genParams.coinbase,
+		Coinbase:   genParams.Coinbase,
 	}
 	// Set the extra field.
 	if len(miner.config.ExtraData) != 0 {
 		header.Extra = miner.config.ExtraData
 	}
 	// Set the randomness field from the beacon chain if it's available.
-	if genParams.random != (common.Hash{}) {
-		header.MixDigest = genParams.random
+	if genParams.Random != (common.Hash{}) {
+		header.MixDigest = genParams.Random
 	}
 	// Set baseFee and GasLimit if we are on an EIP-1559 chain
 	if miner.chainConfig.IsLondon(header.Number) {
@@ -217,12 +222,12 @@ func (miner *Miner) prepareWork(genParams *generateParams, witness bool) (*envir
 		}
 		header.BlobGasUsed = new(uint64)
 		header.ExcessBlobGas = &excessBlobGas
-		header.ParentBeaconRoot = genParams.beaconRoot
+		header.ParentBeaconRoot = genParams.BeaconRoot
 	}
 	// Could potentially happen if starting to mine in an odd state.
 	// Note genParams.coinbase can be different with header.Coinbase
 	// since clique algorithm can modify the coinbase field in header.
-	env, err := miner.makeEnv(parent, header, genParams.coinbase, witness)
+	env, err := miner.makeEnv(parent, header, genParams.Coinbase, witness)
 	if err != nil {
 		log.Error("Failed to create sealing context", "err", err)
 		return nil, err
@@ -323,113 +328,167 @@ type SimResult struct {
 	Receipt *types.Receipt
 }
 
-// callSimulator is a placeholder function representing the call to the external
-// simulation service, e.g., ethapi.SimulateV1IPSP. It takes the candidate
-// transactions and returns the ones that should be included in the block, along
-// with their execution receipts.
-//
-// The actual implementation would handle the RPC call, parameter marshalling (simOpts),
-// and dependency injection of the API client.
-func (miner *Miner) callSimulator(parent *types.Header, transactions []*types.Transaction) ([]*SimResult, error) {
-	// TODO: Replace this with a real implementation.
-	// In a real implementation, this would be where you call your simulation logic:
-	//
-	// 1. Obtain a context, e.g., `ctx := context.Background()`.
-	// 2. Get an instance of your `BlockChainAPI`. This would likely need to be
-	//    injected into the Miner object when it's created to avoid import cycles.
-	// 3. Construct the `simOpts` and `blockNrOrHash` parameters. The parent hash
-	//    can be found in `parent.Hash()`. The transactions are in the `transactions` slice.
-	// 4. Make the call: `results, err := api.SimulateV1IPSP(ctx, opts, &rpc.BlockNumberOrHash{BlockHash: parent.Hash()})`
-	// 5. Convert the `[]*state.SimBlockResult` from the API into `[]*SimResult` for processing.
-
-	log.Warn("Transaction simulation is not implemented. Block will contain no transactions from this batch.")
-	return nil, fmt.Errorf("simulation logic not implemented")
+// SimulationResult represents the result of firewall simulation
+type SimulationResult struct {
+	IncludedTxs []*types.Transaction
+	DroppedTxs  []*ethapi.DroppedTxInfo
 }
 
-// commitTransactionsWithSimulation uses an external simulator to select and order transactions,
-// then commits them to the environment. This function is intended to be called from
-// fillTransactions instead of the original commitTransactions.
-func (miner *Miner) commitTransactionsWithSimulation(env *environment, plainTxs, blobTxs *transactionsByPriceAndNonce, interrupt *atomic.Int32) error {
-	// 1. Collect all candidate transactions from the iterators into a single slice.
-	var candidates []*types.Transaction
-	drain := func(txs *transactionsByPriceAndNonce) {
-		for {
-			// Check for interruption signals.
-			if interrupt != nil {
-				if signal := interrupt.Load(); signal != commitInterruptNone {
-					return
-				}
-			}
-			ltx, _ := txs.Peek()
-			if ltx == nil {
-				break
-			}
-			if tx := ltx.Resolve(); tx != nil {
-				candidates = append(candidates, tx)
-			}
-			txs.Shift() // Use Shift to process one-by-one in price/nonce order.
-		}
-	}
-	drain(plainTxs)
-	drain(blobTxs)
-
-	if len(candidates) == 0 {
-		return nil
+// simulateAndFilterTransactions calls the firewall API to simulate and filter transactions
+func (miner *Miner) simulateAndFilterTransactions(parent *types.Header, transactions []*types.Transaction) (*SimulationResult, error) {
+	if len(transactions) == 0 {
+		return &SimulationResult{IncludedTxs: []*types.Transaction{}}, nil
 	}
 
-	// 2. Call the simulator with the candidate transactions.
-	results, err := miner.callSimulator(env.header, candidates)
-	if err != nil {
-		// If simulation fails, we could fall back to the original greedy strategy.
-		// For now, we'll just log and continue, resulting in an empty block
-		// for this set of transactions.
-		log.Error("Failed to simulate transactions for block production", "err", err)
-		return nil // Return nil to allow other batches (e.g., normal txs) to be processed.
+	// Use the injected firewall API directly
+	if miner.firewallAPI == nil {
+		log.Warn("Firewall API not available, proceeding without filtering")
+		return &SimulationResult{IncludedTxs: transactions}, nil
 	}
 
-	// 3. Commit the transactions returned by the simulator.
-	if env.gasPool == nil {
-		env.gasPool = new(core.GasPool).AddGas(env.header.GasLimit)
-	}
-
-	for _, result := range results {
-		tx := result.Tx
-		receipt := result.Receipt
-
-		// Basic checks to ensure the simulated transaction still fits.
-		if env.gasPool.Gas() < receipt.GasUsed {
-			log.Warn("Simulator returned transaction that exceeds gas limit", "hash", tx.Hash(), "have", env.gasPool.Gas(), "want", receipt.GasUsed)
+	// Marshal transactions to bytes for the API call
+	txBytes := make([]hexutil.Bytes, len(transactions))
+	for i, tx := range transactions {
+		data, err := tx.MarshalBinary()
+		if err != nil {
+			log.Warn("Failed to marshal transaction for simulation", "hash", tx.Hash(), "err", err)
 			continue
 		}
-		// Update environment with the simulated result. We trust the receipt
-		// from the simulator and don't re-execute the transaction.
-		env.gasPool.SubGas(receipt.GasUsed)
-		env.txs = append(env.txs, tx)
-		env.receipts = append(env.receipts, receipt)
-		env.tcount++
+		txBytes[i] = hexutil.Bytes(data)
+	}
 
-		// Handle blob transactions specifically.
-		if tx.Type() == types.BlobTxType {
-			if tx.BlobTxSidecar() == nil {
-				log.Error("Simulated blob transaction is missing sidecar", "hash", tx.Hash())
-				continue // Or handle error appropriately.
+	// Prepare simulation arguments - we need to create this struct inline to avoid imports
+	args := struct {
+		ParentBlockHash interface{}                                 `json:"parentBlockHash"`
+		Timestamp       hexutil.Uint64                              `json:"timestamp"`
+		Transactions    []hexutil.Bytes                             `json:"transactions"`
+		Checkpoints     map[common.Hash]state.FullTransactionEvents `json:"checkpoints"`
+	}{
+		ParentBlockHash: rpc.BlockNumberOrHashWithHash(parent.Hash(), false),
+		Timestamp:       hexutil.Uint64(parent.Time + 1),
+		Transactions:    txBytes,
+		Checkpoints:     make(map[common.Hash]state.FullTransactionEvents),
+	}
+
+	// Call the firewall simulation API
+	ctx := context.Background()
+	result, err := miner.firewallAPI.SimulateBlock(ctx, args)
+	if err != nil {
+		log.Error("Firewall simulation failed", "err", err)
+		// Fallback: return all transactions (no filtering)
+		return &SimulationResult{IncludedTxs: transactions}, nil
+	}
+
+	// We need to extract the fields from the interface{} result
+	// Since we can't import the types, we'll use type assertion with map[string]interface{}
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		log.Error("Unexpected result type from firewall API")
+		return &SimulationResult{IncludedTxs: transactions}, nil
+	}
+
+	// Extract included transactions
+	var includedTxs []*types.Transaction
+	if includedTxsInterface, exists := resultMap["includedTxs"]; exists {
+		if includedTxsList, ok := includedTxsInterface.([]*types.Transaction); ok {
+			includedTxs = includedTxsList
+		} else {
+			log.Warn("Could not parse included transactions from firewall result")
+			includedTxs = transactions // Fallback
+		}
+	} else {
+		includedTxs = transactions // Fallback
+	}
+
+	// Extract dropped transactions info for logging
+	var droppedCount int
+	if droppedTxsInterface, exists := resultMap["droppedTxs"]; exists {
+		if droppedTxsList, ok := droppedTxsInterface.([]interface{}); ok {
+			droppedCount = len(droppedTxsList)
+			// Log each dropped transaction
+			for i, droppedInterface := range droppedTxsList {
+				if droppedMap, ok := droppedInterface.(map[string]interface{}); ok {
+					hash := "unknown"
+					reason := "unknown"
+					if h, exists := droppedMap["hash"]; exists {
+						if hashStr, ok := h.(string); ok {
+							hash = hashStr
+						}
+					}
+					if r, exists := droppedMap["reason"]; exists {
+						if reasonStr, ok := r.(string); ok {
+							reason = reasonStr
+						}
+					}
+					log.Info("Transaction dropped by firewall", "index", i, "hash", hash, "reason", reason)
+				}
 			}
-			maxBlobs := eip4844.MaxBlobsPerBlock(miner.chainConfig, env.header.Time)
-			if env.blobs+len(tx.BlobTxSidecar().Blobs) > maxBlobs {
-				log.Warn("Simulator returned transaction that exceeds blob limit", "hash", tx.Hash())
-				continue
-			}
-			env.sidecars = append(env.sidecars, tx.BlobTxSidecar())
-			env.blobs += len(tx.BlobTxSidecar().Blobs)
-			*env.header.BlobGasUsed += receipt.BlobGasUsed
 		}
 	}
-	return nil
+
+	log.Info("Firewall simulation completed",
+		"total_txs", len(transactions),
+		"included", len(includedTxs),
+		"dropped", droppedCount)
+
+	return &SimulationResult{
+		IncludedTxs: includedTxs,
+		DroppedTxs:  nil, // We'll populate this separately if needed
+	}, nil
+}
+
+// collectPlainTransactions extracts only plain transactions from the price/nonce iterator
+func (miner *Miner) collectPlainTransactions(plainTxs *transactionsByPriceAndNonce) []*types.Transaction {
+	var candidates []*types.Transaction
+
+	// Create a temporary copy to avoid modifying the original iterator
+	for {
+		ltx, _ := plainTxs.Peek()
+		if ltx == nil {
+			break
+		}
+		if tx := ltx.Resolve(); tx != nil {
+			candidates = append(candidates, tx)
+		}
+		plainTxs.Shift()
+	}
+
+	return candidates
+}
+
+// createFilteredPlainTxIterator creates a new transaction iterator from filtered plain transactions
+func (miner *Miner) createFilteredPlainTxIterator(filteredTxs []*types.Transaction, signer types.Signer, baseFee *big.Int) *transactionsByPriceAndNonce {
+	// Group transactions by sender
+	txsByAccount := make(map[common.Address][]*txpool.LazyTransaction)
+
+	for _, tx := range filteredTxs {
+		sender, err := types.Sender(signer, tx)
+		if err != nil {
+			log.Warn("Failed to derive sender for filtered transaction", "hash", tx.Hash(), "err", err)
+			continue
+		}
+
+		// Create a LazyTransaction wrapper
+		lazyTx := &txpool.LazyTransaction{
+			Pool:      miner.txpool,
+			Hash:      tx.Hash(),
+			Tx:        tx,
+			Time:      time.Now(),
+			GasFeeCap: uint256.MustFromBig(tx.GasFeeCap()), // Convert *big.Int to *uint256.Int
+			GasTipCap: uint256.MustFromBig(tx.GasTipCap()), // Convert *big.Int to *uint256.Int
+			Gas:       tx.Gas(),
+			BlobGas:   tx.BlobGas(),
+		}
+
+		txsByAccount[sender] = append(txsByAccount[sender], lazyTx)
+	}
+
+	return newTransactionsByPriceAndNonce(signer, txsByAccount, baseFee)
 }
 
 // fillTransactions retrieves the pending transactions from the txpool and fills them
-// into the given sealing block. The transaction selection and ordering strategy can
-// be customized with the plugin in the future.
+// into the given sealing block. Plain transactions are filtered through firewall simulation,
+// while blob transactions are processed normally using the original Geth commitTransactions logic.
 func (miner *Miner) fillTransactions(interrupt *atomic.Int32, env *environment) error {
 	miner.confMu.RLock()
 	tip := miner.config.GasPrice
@@ -466,23 +525,336 @@ func (miner *Miner) fillTransactions(interrupt *atomic.Int32, env *environment) 
 			prioBlobTxs[account] = txs
 		}
 	}
-	// Fill the block with all available pending transactions.
+
+	// Process priority transactions
 	if len(prioPlainTxs) > 0 || len(prioBlobTxs) > 0 {
-		plainTxs := newTransactionsByPriceAndNonce(env.signer, prioPlainTxs, env.header.BaseFee)
-		blobTxs := newTransactionsByPriceAndNonce(env.signer, prioBlobTxs, env.header.BaseFee)
+		// Create iterators for priority transactions
+		prioPlainTxsIter := newTransactionsByPriceAndNonce(env.signer, prioPlainTxs, env.header.BaseFee)
+		prioBlobTxsIter := newTransactionsByPriceAndNonce(env.signer, prioBlobTxs, env.header.BaseFee)
 
-		//here, transactions are selected.
+		// Filter plain transactions through firewall if any exist
+		var filteredPlainTxsIter *transactionsByPriceAndNonce
+		if len(prioPlainTxs) > 0 {
+			// Collect plain transaction candidates for simulation
+			plainCandidates := miner.collectPlainTransactions(prioPlainTxsIter)
 
-		if err := miner.commitTransactionsWithSimulation(env, plainTxs, blobTxs, interrupt); err != nil {
+			// Run firewall simulation to filter plain transactions only
+			simResult, err := miner.simulateAndFilterTransactions(env.header, plainCandidates)
+			if err != nil {
+				log.Error("Simulation failed for priority plain transactions", "err", err)
+				// Fallback: use all plain transactions without filtering
+				simResult = &SimulationResult{IncludedTxs: plainCandidates}
+			}
+
+			// Create new iterator with filtered plain transactions
+			filteredPlainTxsIter = miner.createFilteredPlainTxIterator(simResult.IncludedTxs, env.signer, env.header.BaseFee)
+		} else {
+			// No plain transactions, create empty iterator
+			filteredPlainTxsIter = newTransactionsByPriceAndNonce(env.signer, make(map[common.Address][]*txpool.LazyTransaction), env.header.BaseFee)
+		}
+
+		// Commit using original Geth logic with filtered plain transactions and original blob transactions
+		if err := miner.commitTransactions(env, filteredPlainTxsIter, prioBlobTxsIter, interrupt); err != nil {
 			return err
 		}
 	}
-	if len(normalPlainTxs) > 0 || len(normalBlobTxs) > 0 {
-		plainTxs := newTransactionsByPriceAndNonce(env.signer, normalPlainTxs, env.header.BaseFee)
-		blobTxs := newTransactionsByPriceAndNonce(env.signer, normalBlobTxs, env.header.BaseFee)
 
-		if err := miner.commitTransactionsWithSimulation(env, plainTxs, blobTxs, interrupt); err != nil {
+	// Process normal transactions
+	if len(normalPlainTxs) > 0 || len(normalBlobTxs) > 0 {
+		// Create iterators for normal transactions
+		normalPlainTxsIter := newTransactionsByPriceAndNonce(env.signer, normalPlainTxs, env.header.BaseFee)
+		normalBlobTxsIter := newTransactionsByPriceAndNonce(env.signer, normalBlobTxs, env.header.BaseFee)
+
+		// Filter plain transactions through firewall if any exist
+		var filteredPlainTxsIter *transactionsByPriceAndNonce
+		if len(normalPlainTxs) > 0 {
+			// Collect plain transaction candidates for simulation
+			plainCandidates := miner.collectPlainTransactions(normalPlainTxsIter)
+
+			// Run firewall simulation to filter plain transactions only
+			simResult, err := miner.simulateAndFilterTransactions(env.header, plainCandidates)
+			if err != nil {
+				log.Error("Simulation failed for normal plain transactions", "err", err)
+				// Fallback: use all plain transactions without filtering
+				simResult = &SimulationResult{IncludedTxs: plainCandidates}
+			}
+
+			// Create new iterator with filtered plain transactions
+			filteredPlainTxsIter = miner.createFilteredPlainTxIterator(simResult.IncludedTxs, env.signer, env.header.BaseFee)
+		} else {
+			// No plain transactions, create empty iterator
+			filteredPlainTxsIter = newTransactionsByPriceAndNonce(env.signer, make(map[common.Address][]*txpool.LazyTransaction), env.header.BaseFee)
+		}
+
+		// Commit using original Geth logic with filtered plain transactions and original blob transactions
+		if err := miner.commitTransactions(env, filteredPlainTxsIter, normalBlobTxsIter, interrupt); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// fillTransactionsSimulateMode retrieves the pending transactions from the txpool and fills them
+// into the given sealing block. Plain transactions are filtered through firewall simulation,
+// while blob transactions are processed normally using the original Geth commitTransactions logic.
+// This function is specifically for simulate mode, where it will send filtered transactions
+// to an external RPC endpoint and then clear the txpool.
+func (miner *Miner) fillTransactionsSimulateMode(interrupt *atomic.Int32, env *environment) error {
+	miner.confMu.RLock()
+	tip := miner.config.GasPrice
+	prio := miner.prio
+	miner.confMu.RUnlock()
+
+	// Retrieve the pending transactions pre-filtered by the 1559/4844 dynamic fees
+	filter := txpool.PendingFilter{
+		MinTip: uint256.MustFromBig(tip),
+	}
+	if env.header.BaseFee != nil {
+		filter.BaseFee = uint256.MustFromBig(env.header.BaseFee)
+	}
+	if env.header.ExcessBlobGas != nil {
+		filter.BlobFee = uint256.MustFromBig(eip4844.CalcBlobFee(miner.chainConfig, env.header))
+	}
+	filter.OnlyPlainTxs, filter.OnlyBlobTxs = true, false
+	pendingPlainTxs := miner.txpool.Pending(filter)
+
+	filter.OnlyPlainTxs, filter.OnlyBlobTxs = false, true
+	pendingBlobTxs := miner.txpool.Pending(filter)
+
+	// Split the pending transactions into locals and remotes.
+	prioPlainTxs, normalPlainTxs := make(map[common.Address][]*txpool.LazyTransaction), pendingPlainTxs
+	prioBlobTxs, normalBlobTxs := make(map[common.Address][]*txpool.LazyTransaction), pendingBlobTxs
+
+	for _, account := range prio {
+		if txs := normalPlainTxs[account]; len(txs) > 0 {
+			delete(normalPlainTxs, account)
+			prioPlainTxs[account] = txs
+		}
+		if txs := normalBlobTxs[account]; len(txs) > 0 {
+			delete(normalBlobTxs, account)
+			prioBlobTxs[account] = txs
+		}
+	}
+
+	// Process priority transactions
+	if len(prioPlainTxs) > 0 || len(prioBlobTxs) > 0 {
+		// Create iterators for priority transactions
+		prioPlainTxsIter := newTransactionsByPriceAndNonce(env.signer, prioPlainTxs, env.header.BaseFee)
+		prioBlobTxsIter := newTransactionsByPriceAndNonce(env.signer, prioBlobTxs, env.header.BaseFee)
+
+		// Filter plain transactions through firewall if any exist
+		var filteredPlainTxsIter *transactionsByPriceAndNonce
+		if len(prioPlainTxs) > 0 {
+			// Collect plain transaction candidates for simulation
+			plainCandidates := miner.collectPlainTransactions(prioPlainTxsIter)
+
+			// Run firewall simulation to filter plain transactions only
+			simResult, err := miner.simulateAndFilterTransactions(env.header, plainCandidates)
+			if err != nil {
+				log.Error("Simulation failed for priority plain transactions", "err", err)
+				// Fallback: use all plain transactions without filtering
+				simResult = &SimulationResult{IncludedTxs: plainCandidates}
+			}
+
+			// Create new iterator with filtered plain transactions
+			filteredPlainTxsIter = miner.createFilteredPlainTxIterator(simResult.IncludedTxs, env.signer, env.header.BaseFee)
+		} else {
+			// No plain transactions, create empty iterator
+			filteredPlainTxsIter = newTransactionsByPriceAndNonce(env.signer, make(map[common.Address][]*txpool.LazyTransaction), env.header.BaseFee)
+		}
+
+		// Commit using original Geth logic with filtered plain transactions and original blob transactions
+		if err := miner.commitTransactions(env, filteredPlainTxsIter, prioBlobTxsIter, interrupt); err != nil {
+			return err
+		}
+	}
+
+	// Process normal transactions
+	if len(normalPlainTxs) > 0 || len(normalBlobTxs) > 0 {
+		// Create iterators for normal transactions
+		normalPlainTxsIter := newTransactionsByPriceAndNonce(env.signer, normalPlainTxs, env.header.BaseFee)
+		normalBlobTxsIter := newTransactionsByPriceAndNonce(env.signer, normalBlobTxs, env.header.BaseFee)
+
+		// Filter plain transactions through firewall if any exist
+		var filteredPlainTxsIter *transactionsByPriceAndNonce
+		if len(normalPlainTxs) > 0 {
+			// Collect plain transaction candidates for simulation
+			plainCandidates := miner.collectPlainTransactions(normalPlainTxsIter)
+
+			// Run firewall simulation to filter plain transactions only
+			simResult, err := miner.simulateAndFilterTransactions(env.header, plainCandidates)
+			if err != nil {
+				log.Error("Simulation failed for normal plain transactions", "err", err)
+				// Fallback: use all plain transactions without filtering
+				simResult = &SimulationResult{IncludedTxs: plainCandidates}
+			}
+
+			// Create new iterator with filtered plain transactions
+			filteredPlainTxsIter = miner.createFilteredPlainTxIterator(simResult.IncludedTxs, env.signer, env.header.BaseFee)
+		} else {
+			// No plain transactions, create empty iterator
+			filteredPlainTxsIter = newTransactionsByPriceAndNonce(env.signer, make(map[common.Address][]*txpool.LazyTransaction), env.header.BaseFee)
+		}
+
+		// Commit using original Geth logic with filtered plain transactions and original blob transactions
+		if err := miner.commitTransactions(env, filteredPlainTxsIter, normalBlobTxsIter, interrupt); err != nil {
+			return err
+		}
+	}
+
+	// Note: Transaction sending to external RPC is handled by the simulation loop in eth/backend.go
+	// This function only needs to simulate and populate env with the filtered transactions
+
+	return nil
+}
+
+// commitFilteredTransactions commits a pre-filtered list of transactions to the environment
+func (miner *Miner) commitFilteredTransactions(env *environment, transactions []*types.Transaction, interrupt *atomic.Int32) error {
+	if env.gasPool == nil {
+		env.gasPool = new(core.GasPool).AddGas(env.header.GasLimit)
+	}
+
+	for _, tx := range transactions {
+		// Check interruption signal and abort building if it's fired.
+		if interrupt != nil {
+			if signal := interrupt.Load(); signal != commitInterruptNone {
+				return signalToErr(signal)
+			}
+		}
+
+		// If we don't have enough gas for this transaction then we're done.
+		if env.gasPool.Gas() < tx.Gas() {
+			log.Trace("Not enough gas left for transaction", "hash", tx.Hash(), "left", env.gasPool.Gas(), "needed", tx.Gas())
+			break
+		}
+
+		// Check blob constraints for blob transactions
+		if tx.Type() == types.BlobTxType && miner.chainConfig.IsCancun(env.header.Number, env.header.Time) {
+			blobsNeeded := int(tx.BlobGas() / params.BlobTxBlobGasPerBlob)
+			left := eip4844.MaxBlobsPerBlock(miner.chainConfig, env.header.Time) - env.blobs
+			if left < blobsNeeded {
+				log.Trace("Not enough blob space left for transaction", "hash", tx.Hash(), "left", left, "needed", blobsNeeded)
+				break
+			}
+		}
+
+		// Start executing the transaction
+		env.state.SetTxContext(tx.Hash(), env.tcount)
+
+		if err := miner.commitTransaction(env, tx); err != nil {
+			log.Debug("Transaction execution failed", "hash", tx.Hash(), "err", err)
+			// Continue with next transaction - simulation should have caught most issues
+			continue
+		}
+	}
+	return nil
+}
+
+// commitTransactions is the legacy method for committing transactions without simulation
+func (miner *Miner) commitTransactions(env *environment, plainTxs, blobTxs *transactionsByPriceAndNonce, interrupt *atomic.Int32) error {
+	gasLimit := env.header.GasLimit
+	if env.gasPool == nil {
+		env.gasPool = new(core.GasPool).AddGas(gasLimit)
+	}
+	for {
+		// Check interruption signal and abort building if it's fired.
+		if interrupt != nil {
+			if signal := interrupt.Load(); signal != commitInterruptNone {
+				return signalToErr(signal)
+			}
+		}
+		// If we don't have enough gas for any further transactions then we're done.
+		if env.gasPool.Gas() < params.TxGas {
+			log.Trace("Not enough gas for further transactions", "have", env.gasPool, "want", params.TxGas)
+			break
+		}
+		// If we don't have enough blob space for any further blob transactions,
+		// skip that list altogether
+		if !blobTxs.Empty() && env.blobs >= eip4844.MaxBlobsPerBlock(miner.chainConfig, env.header.Time) {
+			log.Trace("Not enough blob space for further blob transactions")
+			blobTxs.Clear()
+			// Fall though to pick up any plain txs
+		}
+		// Retrieve the next transaction and abort if all done.
+		var (
+			ltx *txpool.LazyTransaction
+			txs *transactionsByPriceAndNonce
+		)
+		pltx, ptip := plainTxs.Peek()
+		bltx, btip := blobTxs.Peek()
+
+		switch {
+		case pltx == nil:
+			txs, ltx = blobTxs, bltx
+		case bltx == nil:
+			txs, ltx = plainTxs, pltx
+		default:
+			if ptip.Lt(btip) {
+				txs, ltx = blobTxs, bltx
+			} else {
+				txs, ltx = plainTxs, pltx
+			}
+		}
+		if ltx == nil {
+			break
+		}
+		// If we don't have enough space for the next transaction, skip the account.
+		if env.gasPool.Gas() < ltx.Gas {
+			log.Trace("Not enough gas left for transaction", "hash", ltx.Hash, "left", env.gasPool.Gas(), "needed", ltx.Gas)
+			txs.Pop()
+			continue
+		}
+
+		// Most of the blob gas logic here is agnostic as to if the chain supports
+		// blobs or not, however the max check panics when called on a chain without
+		// a defined schedule, so we need to verify it's safe to call.
+		if miner.chainConfig.IsCancun(env.header.Number, env.header.Time) {
+			left := eip4844.MaxBlobsPerBlock(miner.chainConfig, env.header.Time) - env.blobs
+			if left < int(ltx.BlobGas/params.BlobTxBlobGasPerBlob) {
+				log.Trace("Not enough blob space left for transaction", "hash", ltx.Hash, "left", left, "needed", ltx.BlobGas/params.BlobTxBlobGasPerBlob)
+				txs.Pop()
+				continue
+			}
+		}
+
+		// Transaction seems to fit, pull it up from the pool
+		tx := ltx.Resolve()
+		if tx == nil {
+			log.Trace("Ignoring evicted transaction", "hash", ltx.Hash)
+			txs.Pop()
+			continue
+		}
+
+		// Error may be ignored here. The error has already been checked
+		// during transaction acceptance in the transaction pool.
+		from, _ := types.Sender(env.signer, tx)
+
+		// Check whether the tx is replay protected. If we're not in the EIP155 hf
+		// phase, start ignoring the sender until we do.
+		if tx.Protected() && !miner.chainConfig.IsEIP155(env.header.Number) {
+			log.Trace("Ignoring replay protected transaction", "hash", ltx.Hash, "eip155", miner.chainConfig.EIP155Block)
+			txs.Pop()
+			continue
+		}
+		// Start executing the transaction
+		env.state.SetTxContext(tx.Hash(), env.tcount)
+
+		err := miner.commitTransaction(env, tx)
+		switch {
+		case errors.Is(err, core.ErrNonceTooLow):
+			// New head notification data race between the transaction pool and miner, shift
+			log.Trace("Skipping transaction with low nonce", "hash", ltx.Hash, "sender", from, "nonce", tx.Nonce())
+			txs.Shift()
+
+		case errors.Is(err, nil):
+			// Everything ok, collect the logs and shift in the next transaction from the same account
+			txs.Shift()
+
+		default:
+			// Transaction is regarded as invalid, drop all consecutive transactions from
+			// the same sender because of `nonce-too-high` clause.
+			log.Debug("Transaction failed, account skipped", "hash", ltx.Hash, "err", err)
+			txs.Pop()
 		}
 	}
 	return nil
