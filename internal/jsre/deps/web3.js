@@ -5415,7 +5415,6 @@ var methods = function () {
         name: 'RemoveTransaction',
         call: 'private_removeTransaction',
         params: 1,
-        inputFormatter: [hexutil.hash]
     });
 
     var sendTransaction = new Method({
