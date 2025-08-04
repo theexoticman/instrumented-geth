@@ -156,8 +156,7 @@ var (
 		utils.BeaconGenesisRootFlag,
 		utils.BeaconGenesisTimeFlag,
 		utils.BeaconCheckpointFlag,
-		utils.SimulateModeFlag,
-		utils.ExternalRPCFlag,
+		utils.IntentGuardFlag,
 		utils.BeaconCheckpointFileFlag,
 	}, utils.NetworkFlags, utils.DatabaseFlags)
 
@@ -345,9 +344,9 @@ func geth(ctx *cli.Context) error {
 	}
 
 	prepare(ctx)
-	SimulateMode := ctx.Bool("simulate-mode")
+	IntentGuardMode := ctx.Bool("intentguard")
 
-	stack, _ := makeFullNode(ctx, SimulateMode)
+	stack, _ := makeFullNode(ctx, IntentGuardMode)
 	defer stack.Close()
 
 	startNode(ctx, stack, false)

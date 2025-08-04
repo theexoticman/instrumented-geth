@@ -864,3 +864,30 @@ func (p *rpcProgress) toSyncProgress() *ethereum.SyncProgress {
 		TxIndexRemainingBlocks: uint64(p.TxIndexRemainingBlocks),
 	}
 }
+
+// GetPendingTransactions retrieves up to 10 pending transactions from the private pool.
+func (ec *Client) GetPendingTransactions(ctx context.Context) ([][]byte, error) {
+	var result []hexutil.Bytes
+	err := ec.c.CallContext(ctx, &result, "private_getPendingTransactions")
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert hexutil.Bytes to []byte
+	transactions := make([][]byte, len(result))
+	for i, tx := range result {
+		transactions[i] = []byte(tx)
+	}
+
+	return transactions, nil
+}
+
+// RemoveTransaction removes a transaction from the private pool by hash.
+func (ec *Client) RemoveTransaction(ctx context.Context, txHash common.Hash) (bool, error) {
+	var result bool
+	err := ec.c.CallContext(ctx, &result, "private_removeTransaction", txHash)
+	if err != nil {
+		return false, err
+	}
+	return result, nil
+}

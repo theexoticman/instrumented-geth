@@ -295,6 +295,17 @@ func newBackendMock() *backendMock {
 		config: config,
 	}
 }
+func (b backendMock) GetPrivatePoolTransactions(limit int) []*types.Transaction {
+	return nil // Return empty for tests
+}
+
+func (b backendMock) AddToPrivatePool(tx *types.Transaction) error {
+	return nil // No-op for tests
+}
+
+func (b backendMock) RemovePrivatePoolTransaction(txHash common.Hash) bool {
+	return false // No-op for tests
+}
 
 func (b *backendMock) setFork(fork string) error {
 	if fork == "legacy" {
@@ -414,7 +425,7 @@ func (b *backendMock) GetTransactionEvents(ctx context.Context, hash common.Hash
 	return nil, nil
 }
 
-func (b *backendMock) IsSimulateMode() bool { return false }
+func (b *backendMock) IsIntentGuardModeEnabled() bool { return false }
 
 func (b *backendMock) SimChainStore() *state.SimulatedChainStore { return nil }
 

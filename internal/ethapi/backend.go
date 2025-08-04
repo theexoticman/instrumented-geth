@@ -104,8 +104,13 @@ type Backend interface {
 
 	// Added for IPSP
 	SimChainStore() *state.SimulatedChainStore
-	IsSimulateMode() bool
+	IsIntentGuardModeEnabled() bool
 	TxSimulationPool() *firewall.TxSimulationPool
+
+	// Added for Intent Guard mode
+	AddToPrivatePool(tx *types.Transaction) error
+	GetPrivatePoolTransactions(limit int) []*types.Transaction
+	RemovePrivatePoolTransaction(txHash common.Hash) bool
 }
 
 func GetAPIs(apiBackend Backend) []rpc.API {
@@ -132,6 +137,9 @@ func GetAPIs(apiBackend Backend) []rpc.API {
 		}, {
 			Namespace: "firewall",
 			Service:   NewFirewallAPI(apiBackend),
+		}, {
+			Namespace: "private",
+			Service:   NewPrivateAPI(apiBackend),
 		},
 	}
 }

@@ -125,8 +125,8 @@ func createMockUserSimulationApproval() state.FullTransactionEvents {
 // Extended test backend with firewall support
 type FirewallTestBackend struct {
 	*TestBackend
-	txSimulationPool *firewall.TxSimulationPool
-	isSimulateMode   bool
+	txSimulationPool  *firewall.TxSimulationPool
+	isIntentGuardMode bool
 }
 
 func (b *FirewallTestBackend) TxSimulationPool() *firewall.TxSimulationPool {
@@ -149,9 +149,9 @@ func newTestBackendWithFirewall(t *testing.T, genBlocks int, genesis *core.Genes
 	})
 
 	return &FirewallTestBackend{
-		TestBackend:      backend,
-		txSimulationPool: firewall.NewTxSimulationPool(),
-		isSimulateMode:   true,
+		TestBackend:       backend,
+		txSimulationPool:  firewall.NewTxSimulationPool(),
+		isIntentGuardMode: true,
 	}
 }
 

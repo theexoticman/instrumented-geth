@@ -962,15 +962,15 @@ Please note that --` + MetricsHTTPFlag.Name + ` must be set to start the server.
 		Category: flags.MetricsCategory,
 	}
 
-	SimulateModeFlag = &cli.BoolFlag{
-		Name:  "simulate-mode",
-		Usage: "Intercept eth_sendTransaction and simulate it locally, with local mining, instead of broadcasting to the network",
+	IntentGuardFlag = &cli.BoolFlag{
+		Name:  "intentguard",
+		Usage: "Enable Intent Guard mode: intercept eth_sendRawTransaction and store in private pool for block builders",
 	}
 
-	ExternalRPCFlag = &cli.StringFlag{
-		Name:  "external-rpc",
-		Usage: "External RPC endpoint to forward filtered transactions (required in simulate mode)",
-		Value: "",
+	PrivatePoolSizeFlag = &cli.IntFlag{
+		Name:  "private-pool-size",
+		Usage: "Maximum number of transactions in the private pool for Intent Guard mode",
+		Value: 10,
 	}
 )
 
@@ -1883,12 +1883,12 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 		}
 	}
 
-	// Add this back to setEthConfig function
-	if ctx.IsSet(SimulateModeFlag.Name) {
-		cfg.SimulateMode = true
+	// Intent Guard mode configuration
+	if ctx.IsSet(IntentGuardFlag.Name) {
+		cfg.IntentGuard = true
 	}
-	if ctx.IsSet(ExternalRPCFlag.Name) && ctx.String(ExternalRPCFlag.Name) != "" {
-		cfg.ExternalRPC = ctx.String(ExternalRPCFlag.Name)
+	if ctx.IsSet(PrivatePoolSizeFlag.Name) {
+		cfg.PrivatePoolSize = ctx.Int(PrivatePoolSizeFlag.Name)
 	}
 }
 

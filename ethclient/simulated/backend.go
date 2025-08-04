@@ -124,7 +124,7 @@ func NewSimulatedEthereumBackend(
 	}
 	ethConf.SyncMode = ethconfig.FullSync
 	ethConf.TxPool.NoLocals = true
-	ethConf.SimulateMode = true
+	ethConf.IntentGuard = true
 
 	for _, opt := range options {
 		opt(&nodeConf, &ethConf)

@@ -58,7 +58,8 @@ func NewFirewallAPI(backend Backend) *FirewallAPI {
 type FirewallAPIArgs struct {
 	ParentBlockHash rpc.BlockNumberOrHash `json:"parentBlockHash"`
 	Timestamp       hexutil.Uint64        `json:"timestamp"`
-	Transactions    []hexutil.Bytes       `json:"transactions"`
+	// Raw transaction bytes
+	Transactions []hexutil.Bytes `json:"transactions"`
 	// Checkpoints maps a transaction hash to its expected simulation result.
 	// Only transactions included in this map will be validated by the firewall.
 	Checkpoints map[common.Hash]state.FullTransactionEvents `json:"checkpoints"`
@@ -109,7 +110,7 @@ func (api *FirewallAPI) SimulateBlock(ctx context.Context, args FirewallAPIArgs)
 	var includedTxs []*types.Transaction
 	var droppedTxs []*DroppedTxInfo
 
-	// 3. Decode transactions
+	// 3. Decode raw transaction bytes
 	txs := make(types.Transactions, len(args.Transactions))
 	for i, txData := range args.Transactions {
 		var tx types.Transaction
@@ -131,11 +132,14 @@ func (api *FirewallAPI) SimulateBlock(ctx context.Context, args FirewallAPIArgs)
 
 			// Create a sandboxed state for the dry run
 			simState := statedb.Copy()
+			// Create a copy of gasPool for simulation to avoid affecting main execution
+			simGasPool := new(core.GasPool).AddGas(gasPool.Gas())
+
 			// Get a correctly configured EVM instance for the simulation.
 			evm := api.backend.GetEVM(ctx, simState, header, &vmConfig, &blockContext)
 
 			// Apply the transaction using the EVM-centric function.
-			_, err := core.ApplyTransaction(evm, gasPool, simState, header, tx, &header.GasUsed)
+			_, err := core.ApplyTransaction(evm, simGasPool, simState, header, tx, &header.GasUsed)
 			if err != nil {
 				log.Warn("Firewall tx failed pre-simulation, dropping", "index", i, "hash", txHash, "err", err)
 				droppedTxs = append(droppedTxs, &DroppedTxInfo{Hash: txHash, Reason: fmt.Sprintf("Pre-simulation failed: %v", err)})
@@ -155,14 +159,15 @@ func (api *FirewallAPI) SimulateBlock(ctx context.Context, args FirewallAPIArgs)
 			}
 			log.Info("Firewall validation successful", "index", i, "hash", txHash)
 		}
-		// 5. Apply the transaction to the main state
+
+		// 5. Apply the transaction to the main state (both simulated and non-simulated txs reach here)
 		snapshot := statedb.Snapshot()
 		evm := api.backend.GetEVM(ctx, statedb, header, &vm.Config{}, &blockContext)
 
 		_, err = core.ApplyTransaction(evm, gasPool, statedb, header, tx, &header.GasUsed)
 		if err != nil {
 			log.Warn("Transaction failed during main simulation, dropping", "index", i, "hash", txHash, "err", err)
-			droppedTxs = append(droppedTxs, &DroppedTxInfo{Hash: txHash, Reason: fmt.Sprintf("Execution failed: %v", err)})
+			// droppedTxs = append(droppedTxs, &DroppedTxInfo{Hash: txHash, Reason: fmt.Sprintf("Execution failed: %v", err)})
 			statedb.RevertToSnapshot(snapshot)
 			continue
 		}

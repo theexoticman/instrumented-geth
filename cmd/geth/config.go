@@ -182,10 +182,10 @@ func makeConfigNode(ctx *cli.Context) (*node.Node, gethConfig) {
 }
 
 // makeFullNode loads geth configuration and creates the Ethereum backend.
-func makeFullNode(ctx *cli.Context, simulateMode bool) (*node.Node, *eth.Ethereum) {
+func makeFullNode(ctx *cli.Context, intentGuard bool) (*node.Node, *eth.Ethereum) {
 	stack, cfg := makeConfigNode(ctx)
 	// quick win. adding simulate mode to the config
-	cfg.Eth.SimulateMode = simulateMode
+	cfg.Eth.IntentGuard = intentGuard
 
 	if ctx.IsSet(utils.OverridePrague.Name) {
 		v := ctx.Uint64(utils.OverridePrague.Name)
@@ -201,8 +201,8 @@ func makeFullNode(ctx *cli.Context, simulateMode bool) (*node.Node, *eth.Ethereu
 
 	backend, eth := utils.RegisterEthService(stack, &cfg.Eth)
 
-	if simulateMode {
-		eth.EnableSimulateMode()
+	if intentGuard {
+		eth.EnableIntentGuardMode()
 	}
 
 	// Create gauge with geth system and build information

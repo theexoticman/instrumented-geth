@@ -51,7 +51,7 @@ func setupSimulatedEthereum(t *testing.T) (*simulated.Backend, *eth.Ethereum, *e
 
 	backend, ethService, err := simulated.NewSimulatedEthereumBackend(genesisAlloc)
 	require.NoError(t, err)
-	require.True(t, ethService.IsSimulateMode())
+	require.True(t, ethService.IsIntentGuard())
 
 	return backend, ethService, key, addr
 }

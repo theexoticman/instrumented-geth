@@ -841,8 +841,8 @@ func (api *BlockChainAPI) SimulateV1(ctx context.Context, opts simOpts, blockNrO
 // used in solo mining in combination with the simulation store
 func (api *BlockChainAPI) SimulateV1IPSP(ctx context.Context, opts simOpts, blockNrOrHash *rpc.BlockNumberOrHash) ([]*state.SimBlockResult, error) {
 	if simB, ok := api.b.(interface {
-		IsSimulateMode() bool
-	}); ok && simB.IsSimulateMode() {
+		IsIntentGuardModeEnabled() bool
+	}); ok && simB.IsIntentGuardModeEnabled() {
 		if len(opts.BlockStateCalls) == 0 {
 			return nil, &invalidParamsError{message: "empty input"}
 		} else if len(opts.BlockStateCalls) > maxSimulateBlocks {
@@ -1760,10 +1760,10 @@ func (api *TransactionAPI) SendRawTransactionBackup(ctx context.Context, input h
 
 	// Simulated mode logic
 	if simB, ok := api.b.(interface {
-		IsSimulateMode() bool
+		IsIntentGuardModeEnabled() bool
 		SimChainStore() *state.SimulatedChainStore
 	}); ok {
-		if simB.IsSimulateMode() {
+		if simB.IsIntentGuardModeEnabled() {
 			// Simulate transaction logic here
 			if err := simulateAndStore(ctx, api.b, tx); err != nil {
 				return common.Hash{}, err
@@ -1778,11 +1778,39 @@ func (api *TransactionAPI) SendRawTransactionBackup(ctx context.Context, input h
 
 // SendRawTransaction will add the signed transaction to the transaction pool.
 // The sender is responsible for signing the transaction and using the correct nonce.
+// In Intent Guard mode, transactions are routed to the private pool instead.
 func (api *TransactionAPI) SendRawTransaction(ctx context.Context, input hexutil.Bytes) (common.Hash, error) {
 	tx := new(types.Transaction)
 	if err := tx.UnmarshalBinary(input); err != nil {
 		return common.Hash{}, err
 	}
+
+	// Check if Intent Guard mode is enabled
+	if api.b.IsIntentGuardModeEnabled() {
+		// Route to private pool for Intent Guard mode
+		if err := api.b.AddToPrivatePool(tx); err != nil {
+			return common.Hash{}, fmt.Errorf("failed to add transaction to private pool: %v", err)
+		}
+
+		// Log the transaction submission
+		head := api.b.CurrentBlock()
+		signer := types.MakeSigner(api.b.ChainConfig(), head.Number, head.Time)
+		from, err := types.Sender(signer, tx)
+		if err != nil {
+			return common.Hash{}, err
+		}
+
+		if tx.To() == nil {
+			addr := crypto.CreateAddress(from, tx.Nonce())
+			log.Info("Added contract creation to private pool", "hash", tx.Hash().Hex(), "from", from, "nonce", tx.Nonce(), "contract", addr.Hex(), "value", tx.Value())
+		} else {
+			log.Info("Added transaction to private pool", "hash", tx.Hash().Hex(), "from", from, "nonce", tx.Nonce(), "recipient", tx.To(), "value", tx.Value())
+		}
+
+		return tx.Hash(), nil
+	}
+
+	// Default path: route to normal txpool
 	return SubmitTransaction(ctx, api.b, tx)
 }
 
@@ -2155,8 +2183,8 @@ func simulateAndStore(ctx context.Context, backend Backend, tx *types.Transactio
 	// Store simulated artifacts if the backend supports it and is in simulate mode
 	if simStoreProvider, ok := backend.(interface {
 		SimChainStore() *state.SimulatedChainStore
-		IsSimulateMode() bool // Corrected: Use exported method name
-	}); ok && simStoreProvider.IsSimulateMode() { // Corrected: Call exported method
+		IsIntentGuardModeEnabled() bool // Corrected: Use exported method name
+	}); ok && simStoreProvider.IsIntentGuardModeEnabled() {
 		simStore := simStoreProvider.SimChainStore()
 		if simStore != nil {
 			// StoreSimulatedArtifacts(simStore, results, finalState, tx) // Use the existing utility
@@ -2247,18 +2275,20 @@ type YourCustomEvent struct {
 
 func (api *TransactionAPI) StoreUserSimulation(hash common.Hash, events state.FullTransactionEvents) error {
 	if simStoreProvider, ok := api.b.(interface {
-		IsSimulateMode() bool
-	}); ok && simStoreProvider.IsSimulateMode() {
+		IsIntentGuardModeEnabled() bool
+	}); ok && simStoreProvider.IsIntentGuardModeEnabled() {
 		api.b.TxSimulationPool().AddUserSimulation(hash, events)
 	}
 	return nil
 }
+
+// TODO refactor the simchainstore regarding the storage of events.
 func (api *TransactionAPI) GetTransactionEvents(ctx context.Context, hash common.Hash) (*state.FullTransactionEvents, error) {
 	// Check if the backend supports simulate mode and has a SimChainStore
 	if simB, ok := api.b.(interface {
 		SimChainStore() *state.SimulatedChainStore
-		IsSimulateMode() bool
-	}); ok && simB.IsSimulateMode() {
+		IsIntentGuardModeEnabled() bool
+	}); ok && simB.IsIntentGuardModeEnabled() {
 		store := simB.SimChainStore()
 		if store == nil {
 			return nil, fmt.Errorf("simulate mode is active, but SimChainStore is nil")

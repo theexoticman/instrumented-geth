@@ -48,13 +48,13 @@ import (
 
 // EthAPIBackend implements ethapi.Backend and tracers.Backend for full nodes
 type EthAPIBackend struct {
-	extRPCEnabled         bool
-	allowUnprotectedTxs   bool
-	eth                   *Ethereum
-	gpo                   *gasprice.Oracle
-	SimStore              *state.SimulatedChainStore // Add this field
-	IsSimulateModeEnabled bool
-	txSimulationPool      *firewall.TxSimulationPool // DONT USE THIS, USE THE ONE IN THE ETHEREUM PACKAGE
+	extRPCEnabled       bool
+	allowUnprotectedTxs bool
+	eth                 *Ethereum
+	gpo                 *gasprice.Oracle
+	SimStore            *state.SimulatedChainStore // Add this field
+	IsIntentGuard       bool
+	txSimulationPool    *firewall.TxSimulationPool // DONT USE THIS, USE THE ONE IN THE ETHEREUM PACKAGE
 }
 
 // ChainConfig returns the active chain configuration.
@@ -475,11 +475,11 @@ func (b *EthAPIBackend) StateAtTransaction(ctx context.Context, block *types.Blo
 }
 
 // In eth/api_backend.go
-func (b *EthAPIBackend) IsSimulateMode() bool {
+func (b *EthAPIBackend) IsIntentGuardModeEnabled() bool {
 	if b.eth == nil {
 		return false
 	}
-	return b.eth.IsSimulateMode() // Calls the IsSimulateMode method on the *Ethereum instance
+	return b.eth.IsIntentGuard()
 }
 
 func (b *EthAPIBackend) SimChainStore() *state.SimulatedChainStore {
@@ -489,11 +489,28 @@ func (b *EthAPIBackend) SimChainStore() *state.SimulatedChainStore {
 	return b.eth.SimChainStore() // Calls the SimChainStore method on the *Ethereum instance
 }
 
+func (b *EthAPIBackend) AddToPrivatePool(tx *types.Transaction) error {
+	if b.eth == nil {
+		return fmt.Errorf("ethereum service not available")
+	}
+	return b.eth.AddToPrivatePool(tx)
+}
+
+func (b *EthAPIBackend) GetPrivatePoolTransactions(limit int) []*types.Transaction {
+	if b.eth == nil || b.eth.PrivateTxPool() == nil {
+		return nil
+	}
+	return b.eth.PrivateTxPool().GetPendingTransactions(limit)
+}
+
+func (b *EthAPIBackend) RemovePrivatePoolTransaction(txHash common.Hash) bool {
+	if b.eth == nil || b.eth.PrivateTxPool() == nil {
+		return false
+	}
+	return b.eth.PrivateTxPool().RemoveTransaction(txHash)
+}
+
 func (b *EthAPIBackend) GetTransactionEvents(ctx context.Context, hash common.Hash) (*state.FullTransactionEvents, error) {
 	// PoC Stub for non-simulate path
 	return nil, fmt.Errorf("GetTransactionEvents on EthAPIBackend: non-simulate mode path is a stub for PoC")
-}
-
-func (b *EthAPIBackend) GetResponseManager() interface{} {
-	return b.eth.responseManager
 }

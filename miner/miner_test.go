@@ -50,6 +50,10 @@ func NewMockBackend(bc *core.BlockChain, txPool *txpool.TxPool) *mockBackend {
 	}
 }
 
+func (m *mockBackend) TxSimulationPool() interface{} {
+	return nil
+}
+
 func (m *mockBackend) BlockChain() *core.BlockChain {
 	return m.bc
 }
@@ -164,6 +168,6 @@ func createMiner(t *testing.T) *Miner {
 
 	// Create Miner
 	backend := NewMockBackend(bc, txpool)
-	miner := New(backend, config, engine)
+	miner := New(backend, &config, engine, nil)
 	return miner
 }

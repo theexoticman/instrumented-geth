@@ -5404,6 +5404,19 @@ var methods = function () {
         params: 1,
         inputFormatter: [null]
     });
+      var getPrivatePendingTransactions = new Method({
+        name: 'GetPendingTransactions',
+        call: 'private_getPendingTransactions',
+        params: 0,
+        inputFormatter: []
+    });
+
+    var removePrivatePendingTransaction = new Method({
+        name: 'RemoveTransaction',
+        call: 'private_removeTransaction',
+        params: 1,
+        inputFormatter: [hexutil.hash]
+    });
 
     var sendTransaction = new Method({
         name: 'sendTransaction',
@@ -5487,6 +5500,9 @@ var methods = function () {
         call,
         estimateGas,
         sendRawTransaction,
+        getPrivatePendingTransactions,
+        removePrivatePendingTransaction,
+        getTransactionEvents,
         signTransaction,
         sendTransaction,
         sign,

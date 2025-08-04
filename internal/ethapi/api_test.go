@@ -451,7 +451,7 @@ func (b *TestBackend) GetTransactionEvents(ctx context.Context, hash common.Hash
 }
 
 // Add this method to implement the Backend interface
-func (b *TestBackend) IsSimulateMode() bool {
+func (b *TestBackend) IsIntentGuardModeEnabled() bool {
 	return b.simStore != nil
 }
 
@@ -665,6 +665,18 @@ func (b TestBackend) SimChainStore() *state.SimulatedChainStore {
 
 func (b TestBackend) TxSimulationPool() *firewall.TxSimulationPool {
 	return firewall.NewTxSimulationPool()
+}
+
+func (b TestBackend) GetPrivatePoolTransactions(limit int) []*types.Transaction {
+	return nil // Return empty for tests
+}
+
+func (b TestBackend) AddToPrivatePool(tx *types.Transaction) error {
+	return nil // No-op for tests
+}
+
+func (b TestBackend) RemovePrivatePoolTransaction(txHash common.Hash) bool {
+	return false // No-op for tests
 }
 
 func TestEstimateGas(t *testing.T) {

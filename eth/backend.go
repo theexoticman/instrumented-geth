@@ -48,7 +48,6 @@ import (
 	"github.com/ethereum/go-ethereum/eth/protocols/eth"
 	"github.com/ethereum/go-ethereum/eth/protocols/snap"
 	"github.com/ethereum/go-ethereum/eth/tracers"
-	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/internal/ethapi"
@@ -79,7 +78,7 @@ func (w *FirewallAPIWrapper) SimulateBlock(ctx context.Context, args interface{}
 	// Convert the args to the proper type
 	firewallArgs, ok := args.(ethapi.FirewallAPIArgs)
 	if !ok {
-		// Try to convert from the inline struct we created in worker.go
+		// Try to convert from the inline~ struct we created in worker.go
 		if argsMap, ok := args.(struct {
 			ParentBlockHash interface{}                                 `json:"parentBlockHash"`
 			Timestamp       hexutil.Uint64                              `json:"timestamp"`
@@ -117,69 +116,6 @@ func (w *FirewallAPIWrapper) SimulateBlock(ctx context.Context, args interface{}
 	}, nil
 }
 
-// SimulationResponseManager handles pending transaction responses in simulate mode
-type SimulationResponseManager struct {
-	mu               sync.RWMutex
-	pendingResponses map[common.Hash]chan *SimulationResponse
-	timeout          time.Duration
-}
-
-type SimulationResponse struct {
-	TxHash common.Hash `json:"txHash"`
-	Status string      `json:"status"` // "success", "failed", "protected"
-	Reason string      `json:"reason,omitempty"`
-	Result interface{} `json:"result,omitempty"`
-}
-
-func NewSimulationResponseManager() *SimulationResponseManager {
-	return &SimulationResponseManager{
-		pendingResponses: make(map[common.Hash]chan *SimulationResponse),
-		timeout:          30 * time.Second, // 30s timeout for responses
-	}
-}
-
-func (srm *SimulationResponseManager) AddPendingTx(txHash common.Hash) chan *SimulationResponse {
-	srm.mu.Lock()
-	defer srm.mu.Unlock()
-
-	respChan := make(chan *SimulationResponse, 1)
-	srm.pendingResponses[txHash] = respChan
-
-	// Set timeout to clean up abandoned responses
-	go func() {
-		timer := time.NewTimer(srm.timeout)
-		defer timer.Stop()
-
-		select {
-		case <-timer.C:
-			srm.mu.Lock()
-			delete(srm.pendingResponses, txHash)
-			srm.mu.Unlock()
-			close(respChan)
-		case <-respChan:
-			// Response sent, cleanup handled elsewhere
-		}
-	}()
-
-	return respChan
-}
-
-func (srm *SimulationResponseManager) SendResponse(txHash common.Hash, response *SimulationResponse) {
-	srm.mu.Lock()
-	defer srm.mu.Unlock()
-
-	if respChan, exists := srm.pendingResponses[txHash]; exists {
-		select {
-		case respChan <- response:
-		default:
-			// Channel full or closed, ignore
-		}
-		delete(srm.pendingResponses, txHash)
-		close(respChan)
-	}
-}
-
-// Add these type definitions after line 132
 type SimulationResult struct {
 	IncludedTxs []*types.Transaction
 	DroppedTxs  []*ethapi.DroppedTxInfo
@@ -192,95 +128,122 @@ type generateParams struct {
 	noTxs      bool
 }
 
-// Add missing methods at the end of the file
-func (s *Ethereum) sendTransactionsToExternalRPC(txs []*types.Transaction) error {
-	if s.externalRPCClient == nil {
-		return fmt.Errorf("external RPC client not configured")
+// Add methods to support the transaction pool API
+func (s *Ethereum) IsIntentGuard() bool {
+	return s.isIntentGuard
+}
+
+// PrivateTxPool is a simple FIFO pool for private transactions from eth_sendRawTransaction
+type PrivateTxPool struct {
+	mu           sync.RWMutex
+	pending      map[common.Hash]*types.Transaction // tx hash -> transaction
+	order        []common.Hash                      // insertion order (FIFO)
+	maxSize      int                                // size limit
+	nonceTracker map[common.Address]uint64          // for replacement by nonce
+}
+
+// NewPrivateTxPool creates a new private transaction pool
+func NewPrivateTxPool(maxSize int) *PrivateTxPool {
+	return &PrivateTxPool{
+		pending:      make(map[common.Hash]*types.Transaction),
+		order:        make([]common.Hash, 0),
+		maxSize:      maxSize,
+		nonceTracker: make(map[common.Address]uint64),
+	}
+}
+
+// AddTransaction adds a transaction to the private pool with validation
+func (p *PrivateTxPool) AddTransaction(tx *types.Transaction) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Get sender for nonce tracking
+	signer := types.LatestSignerForChainID(tx.ChainId())
+	from, err := types.Sender(signer, tx)
+	if err != nil {
+		return fmt.Errorf("invalid transaction signature: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Send each transaction to the external node via eth_sendRawTransaction
-	var wg sync.WaitGroup
-	successHashes := make([]common.Hash, 0, len(txs))
-	var mu sync.Mutex
-
-	for _, tx := range txs {
-		wg.Add(1)
-		go func(tx *types.Transaction) {
-			defer wg.Done()
-
-			// This calls eth_sendRawTransaction on the external node
-			err := s.externalRPCClient.SendTransaction(ctx, tx)
-			if err != nil {
-				log.Warn("Failed to send transaction to external RPC",
-					"hash", tx.Hash(), "err", err)
-
-				// Send failure response to original client
-				s.responseManager.SendResponse(tx.Hash(), &SimulationResponse{
-					TxHash: tx.Hash(),
-					Status: "failed",
-					Reason: fmt.Sprintf("External RPC rejected: %v", err),
-				})
-			} else {
-				log.Info("Transaction forwarded to external RPC", "hash", tx.Hash())
-
-				mu.Lock()
-				successHashes = append(successHashes, tx.Hash())
-				mu.Unlock()
-
-				// Send success response to original client
-				s.responseManager.SendResponse(tx.Hash(), &SimulationResponse{
-					TxHash: tx.Hash(),
-					Status: "success",
-					Result: tx.Hash().Hex(),
-				})
+	// Check for nonce replacement
+	if existingNonce, exists := p.nonceTracker[from]; exists && tx.Nonce() <= existingNonce {
+		// Find and remove existing transaction with same or lower nonce
+		for i, hash := range p.order {
+			if existingTx, exists := p.pending[hash]; exists {
+				existingSigner := types.LatestSignerForChainID(existingTx.ChainId())
+				existingFrom, _ := types.Sender(existingSigner, existingTx)
+				if existingFrom == from && existingTx.Nonce() <= tx.Nonce() {
+					delete(p.pending, hash)
+					p.order = append(p.order[:i], p.order[i+1:]...)
+					break
+				}
 			}
-		}(tx)
+		}
 	}
 
-	wg.Wait()
+	// FIFO eviction if at capacity
+	for len(p.order) >= p.maxSize {
+		oldestHash := p.order[0]
+		delete(p.pending, oldestHash)
+		p.order = p.order[1:]
+	}
 
-	log.Info("Batch forwarding completed",
-		"total", len(txs),
-		"successful", len(successHashes))
+	// Add new transaction
+	hash := tx.Hash()
+	p.pending[hash] = tx
+	p.order = append(p.order, hash)
+	p.nonceTracker[from] = tx.Nonce()
 
 	return nil
 }
 
-func (s *Ethereum) sendResponsesForCycle(result *SimulationResult) {
-	// Send responses for dropped transactions
-	for _, droppedInfo := range result.DroppedTxs {
-		s.responseManager.SendResponse(droppedInfo.Hash, &SimulationResponse{
-			TxHash: droppedInfo.Hash,
-			Status: "protected",
-			Reason: fmt.Sprintf("IntentGuard protected you: %s", droppedInfo.Reason),
-		})
+// GetPendingTransactions returns up to limit transactions in FIFO order
+func (p *PrivateTxPool) GetPendingTransactions(limit int) []*types.Transaction {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	result := make([]*types.Transaction, 0, limit)
+	for i, hash := range p.order {
+		if i >= limit {
+			break
+		}
+		if tx, exists := p.pending[hash]; exists {
+			result = append(result, tx)
+		}
+	}
+	return result
+}
+
+// RemoveTransaction removes a transaction by hash
+func (p *PrivateTxPool) RemoveTransaction(hash common.Hash) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if _, exists := p.pending[hash]; !exists {
+		return false
 	}
 
-	log.Debug("Sent responses for simulation cycle",
-		"successful", len(result.IncludedTxs),
-		"protected", len(result.DroppedTxs))
+	delete(p.pending, hash)
+	for i, h := range p.order {
+		if h == hash {
+			p.order = append(p.order[:i], p.order[i+1:]...)
+			break
+		}
+	}
+	return true
 }
 
-// Add methods to support the transaction pool API
-func (s *Ethereum) IsSimulateMode() bool {
-	return s.isSimulateMode
+// GetTransaction returns a transaction by hash
+func (p *PrivateTxPool) GetTransaction(hash common.Hash) *types.Transaction {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.pending[hash]
 }
 
-func (s *Ethereum) GetResponseManager() *SimulationResponseManager {
-	return s.responseManager
-}
-
-// Add simulation statistics tracking
-type SimulationStats struct {
-	TotalCycles   uint64
-	TotalTxs      uint64
-	SuccessfulTxs uint64
-	ProtectedTxs  uint64
-	FailedTxs     uint64
-	LastCycleTime time.Time
+// Count returns the number of transactions in the pool
+func (p *PrivateTxPool) Count() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return len(p.pending)
 }
 
 // Add to Ethereum struct
@@ -320,16 +283,12 @@ type Ethereum struct {
 	shutdownTracker *shutdowncheck.ShutdownTracker // Tracks if and when the node has shutdown ungracefully
 
 	// simulate mode
-	isSimulateMode   bool
+	isIntentGuard    bool
 	simStore         *state.SimulatedChainStore
 	txSimulationPool *firewall.TxSimulationPool
 
-	// Simulation loop fields (new)
-	simulationTicker  *time.Ticker
-	simulationStop    chan struct{}
-	externalRPCClient *ethclient.Client
-	responseManager   *SimulationResponseManager
-	simulationStats   *SimulationStats
+	// Private transaction pool for intent guard mode
+	privateTxPool *PrivateTxPool
 }
 
 // New creates a new Ethereum object (including the initialisation of the common Ethereum object),
@@ -400,24 +359,16 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		p2pServer:       stack.Server(),
 		discmix:         enode.NewFairMix(0),
 		shutdownTracker: shutdowncheck.NewShutdownTracker(chainDb),
-		isSimulateMode:  config.SimulateMode,
+		isIntentGuard:   config.IntentGuard,
 	}
-	// Advanced Simulate mode
-	if config.SimulateMode {
+	// Intent Guard mode (formerly simulate mode)
+	if config.IntentGuard {
 		// eth.simStore = state.NewSimulatedChainStore()
 		eth.txSimulationPool = firewall.NewTxSimulationPool()
-		eth.responseManager = NewSimulationResponseManager()
-		eth.simulationStats = &SimulationStats{}
 
-		// Initialize external RPC client if provided
-		if config.ExternalRPC != "" {
-			client, err := ethclient.Dial(config.ExternalRPC)
-			if err != nil {
-				return nil, fmt.Errorf("failed to connect to external RPC: %v", err)
-			}
-			eth.externalRPCClient = client
-			log.Info("Connected to external RPC", "endpoint", config.ExternalRPC)
-		}
+		// Initialize private transaction pool
+		eth.privateTxPool = NewPrivateTxPool(config.PrivatePoolSize)
+		log.Info("Intent Guard mode enabled", "privatePoolSize", config.PrivatePoolSize)
 	}
 	bcVersion := rawdb.ReadDatabaseVersion(chainDb)
 	var dbVer = "<nil>"
@@ -542,13 +493,13 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 
 	// Move APIBackend creation BEFORE miner creation
 	eth.APIBackend = &EthAPIBackend{
-		extRPCEnabled:         stack.Config().ExtRPCEnabled(),
-		allowUnprotectedTxs:   stack.Config().AllowUnprotectedTxs,
-		eth:                   eth,
-		gpo:                   nil,
-		SimStore:              eth.simStore,
-		IsSimulateModeEnabled: eth.isSimulateMode,
-		txSimulationPool:      eth.txSimulationPool,
+		extRPCEnabled:       stack.Config().ExtRPCEnabled(),
+		allowUnprotectedTxs: stack.Config().AllowUnprotectedTxs,
+		eth:                 eth,
+		gpo:                 nil,
+		SimStore:            eth.simStore,
+		IsIntentGuard:       eth.isIntentGuard,
+		txSimulationPool:    eth.txSimulationPool,
 	}
 
 	// THEN create the miner (which now can access the APIBackend)
@@ -608,10 +559,10 @@ func (s *Ethereum) APIs() []rpc.API {
 	apis := ethapi.GetAPIs(s.APIBackend)
 
 	// If in simulate mode, we need to modify the transaction pool API
-	if s.isSimulateMode {
+	if s.isIntentGuard {
 		log.Info("Running in simulate mode - transaction interception enabled")
 		// The transaction pool API will automatically detect simulate mode
-		// through the IsSimulateMode() method we added
+
 	}
 
 	// Append any APIs exposed explicitly by the consensus engine
@@ -637,9 +588,6 @@ func (s *Ethereum) APIs() []rpc.API {
 		}, {
 			Namespace: "firewall",
 			Service:   ethapi.NewFirewallAPI(s.APIBackend),
-		}, {
-			Namespace: "simulate",
-			Service:   NewSimulateAPI(s), // Add simulation-specific API
 		},
 	}...)
 }
@@ -690,10 +638,6 @@ func (s *Ethereum) Start() error {
 	// start log indexer
 	s.filterMaps.Start()
 	go s.updateFilterMapsHeads()
-
-	if s.isSimulateMode && s.externalRPCClient != nil {
-		go s.startSimulationLoop()
-	}
 
 	return nil
 }
@@ -811,18 +755,6 @@ func (s *Ethereum) Stop() error {
 	s.chainDb.Close()
 	s.eventMux.Stop()
 
-	if s.simulationStop != nil {
-		close(s.simulationStop)
-		s.simulationStop = nil
-	}
-	if s.simulationTicker != nil {
-		s.simulationTicker.Stop()
-		s.simulationTicker = nil
-	}
-	if s.externalRPCClient != nil {
-		s.externalRPCClient.Close()
-	}
-
 	return nil
 }
 
@@ -852,11 +784,11 @@ func (s *Ethereum) SyncMode() ethconfig.SyncMode {
 	return ethconfig.FullSync
 }
 
-func (s *Ethereum) EnableSimulateMode() {
-	s.isSimulateMode = true
+func (s *Ethereum) EnableIntentGuardMode() {
+	s.isIntentGuard = true
 }
-func (s *Ethereum) DisableSimulateMode() {
-	s.isSimulateMode = false
+func (s *Ethereum) DisableIntentGuardMode() {
+	s.isIntentGuard = false
 }
 
 func (e *Ethereum) SimChainStore() *state.SimulatedChainStore {
@@ -871,156 +803,14 @@ func (b *EthAPIBackend) TxSimulationPool() *firewall.TxSimulationPool {
 	return b.txSimulationPool
 }
 
-// startSimulationLoop runs the 12s simulation cycle (6s collect + 6s simulate/send)
-func (s *Ethereum) startSimulationLoop() {
-	log.Info("Starting simulation loop, waiting for node to sync...")
-
-	// Wait for node to be fully synced
-	for !s.Synced() {
-		time.Sleep(1 * time.Second)
-	}
-
-	log.Info("Node synced, starting simulation timer")
-
-	// Start 12s ticker (6s collect + 6s simulate/send)
-	s.simulationTicker = time.NewTicker(12 * time.Second)
-	s.simulationStop = make(chan struct{})
-
-	defer func() {
-		if s.simulationTicker != nil {
-			s.simulationTicker.Stop()
-		}
-		if s.simulationStop != nil {
-			close(s.simulationStop)
-		}
-	}()
-
-	for {
-		select {
-		case <-s.simulationTicker.C:
-			// Wait 6s for transaction collection
-			log.Debug("Simulation cycle: collecting transactions for 6s...")
-			time.Sleep(6 * time.Second)
-
-			// Now simulate and send in remaining time
-			log.Debug("Simulation cycle: starting simulation and forwarding...")
-			if err := s.runSimulationCycle(); err != nil {
-				log.Error("Simulation cycle failed", "err", err)
-			}
-
-		case <-s.simulationStop:
-			log.Info("Simulation loop stopped")
-			return
-		}
-	}
+// PrivateTxPool methods for Intent Guard mode
+func (s *Ethereum) PrivateTxPool() *PrivateTxPool {
+	return s.privateTxPool
 }
 
-// runSimulationCycle performs one complete simulation cycle
-func (s *Ethereum) runSimulationCycle() error {
-	start := time.Now()
-	defer func() {
-		s.simulationStats.LastCycleTime = time.Now()
-		s.simulationStats.TotalCycles++
-	}()
-
-	// 1. Lock the txpool during simulation
-	if err := s.txPool.Sync(); err != nil {
-		return fmt.Errorf("failed to sync txpool: %v", err)
+func (s *Ethereum) AddToPrivatePool(tx *types.Transaction) error {
+	if s.privateTxPool == nil {
+		return fmt.Errorf("private transaction pool not initialized")
 	}
-
-	// 2. Create simulation environment using miner logic
-	result, err := s.runTransactionSimulation()
-	if err != nil {
-		log.Error("Transaction simulation failed", "err", err)
-		// Clear txpool even on error
-		s.txPool.Clear()
-		return err
-	}
-
-	// 3. Send successful transactions to external RPC
-	if len(result.IncludedTxs) > 0 {
-		if err := s.sendTransactionsToExternalRPC(result.IncludedTxs); err != nil {
-			log.Error("Failed to send transactions to external RPC", "err", err)
-		}
-	}
-
-	// 4. Send responses to waiting clients
-	s.sendResponsesForCycle(result)
-
-	// 5. Clear the txpool for next cycle
-	s.txPool.Clear()
-
-	log.Info("Simulation cycle completed",
-		"included", len(result.IncludedTxs),
-		"protected", len(result.DroppedTxs),
-		"duration", time.Since(start),
-		"total_cycles", s.simulationStats.TotalCycles)
-
-	// Update statistics
-	s.simulationStats.TotalTxs += uint64(len(result.IncludedTxs) + len(result.DroppedTxs))
-	s.simulationStats.SuccessfulTxs += uint64(len(result.IncludedTxs))
-	s.simulationStats.ProtectedTxs += uint64(len(result.DroppedTxs))
-
-	return nil
-}
-
-// runTransactionSimulation performs the actual simulation using miner logic
-func (s *Ethereum) runTransactionSimulation() (*SimulationResult, error) {
-	// Create a pseudo-environment like the miner does
-	parent := s.blockchain.CurrentBlock()
-	timestamp := uint64(time.Now().Unix())
-
-	genParams := &generateParams{
-		timestamp:  timestamp,
-		parentHash: parent.Hash(),
-		coinbase:   common.Address{}, // Simulation coinbase
-		noTxs:      false,
-	}
-
-	// Use miner's prepareWork to create environment
-	env, err := s.miner.PrepareSimulationWork(&miner.GenerateParams{
-		Timestamp:  genParams.timestamp,
-		ParentHash: genParams.parentHash,
-		Coinbase:   genParams.coinbase,
-		NoTxs:      genParams.noTxs,
-	}, false)
-	if err != nil {
-		return nil, fmt.Errorf("failed to prepare simulation environment: %v", err)
-	}
-
-	// Use the new simulation version of fillTransactions
-	if err := s.miner.FillTransactionsSimulateMode(nil, env); err != nil {
-		return nil, fmt.Errorf("failed to simulate transactions: %v", err)
-	}
-
-	// Extract results from environment
-	return &SimulationResult{
-		IncludedTxs: env.GetTransactions(),
-		DroppedTxs:  env.GetDroppedTxs(),
-	}, nil
-}
-
-// Add new Simulate API for monitoring
-type SimulateAPI struct {
-	eth *Ethereum
-}
-
-func NewSimulateAPI(eth *Ethereum) *SimulateAPI {
-	return &SimulateAPI{eth: eth}
-}
-
-func (api *SimulateAPI) GetStats() map[string]interface{} {
-	if !api.eth.isSimulateMode {
-		return map[string]interface{}{"error": "not in simulate mode"}
-	}
-
-	stats := api.eth.simulationStats
-	return map[string]interface{}{
-		"totalCycles":   stats.TotalCycles,
-		"totalTxs":      stats.TotalTxs,
-		"successfulTxs": stats.SuccessfulTxs,
-		"protectedTxs":  stats.ProtectedTxs,
-		"lastCycleTime": stats.LastCycleTime,
-		"simulateMode":  true,
-	}
+	return s.privateTxPool.AddTransaction(tx)
 }
