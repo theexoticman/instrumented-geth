@@ -22,6 +22,8 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/log"
 )
 
 // PrivateAPI provides an API for block builders to access the private transaction pool
@@ -48,11 +50,28 @@ func (api *PrivateAPI) GetPendingTransactions(ctx context.Context) ([]hexutil.By
 	// Convert transactions to raw bytes
 	result := make([]hexutil.Bytes, len(transactions))
 	for i, tx := range transactions {
+		// Add this logging before marshaling
+		log.Info("GetPendingTransactions: Before marshal",
+			"index", i,
+			"hash", tx.Hash().Hex(),
+			"nonce", tx.Nonce())
+
 		data, err := tx.MarshalBinary()
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal transaction %s: %v", tx.Hash().Hex(), err)
 		}
 		result[i] = data
+
+		// Add this logging to verify round-trip
+		testTx := new(types.Transaction)
+		if err := testTx.UnmarshalBinary(data); err == nil {
+			log.Info("GetPendingTransactions: After marshal/unmarshal test",
+				"index", i,
+				"original_nonce", tx.Nonce(),
+				"roundtrip_nonce", testTx.Nonce(),
+				"original_hash", tx.Hash().Hex(),
+				"roundtrip_hash", testTx.Hash().Hex())
+		}
 	}
 
 	return result, nil

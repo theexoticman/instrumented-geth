@@ -1785,9 +1785,28 @@ func (api *TransactionAPI) SendRawTransaction(ctx context.Context, input hexutil
 		return common.Hash{}, err
 	}
 
+	// Add this logging
+	log.Info("SendRawTransaction: Transaction received",
+		"hash", tx.Hash().Hex(),
+		"nonce", tx.Nonce(),
+	)
+
 	// Check if Intent Guard mode is enabled
 	if api.b.IsIntentGuardModeEnabled() {
-		// Route to private pool for Intent Guard mode
+		// If the transaction fee cap is already specified, ensure the
+		// fee of the given transaction is _reasonable_.
+		if err := checkTxFee(tx.GasPrice(), tx.Gas(), api.b.RPCTxFeeCap()); err != nil {
+			return common.Hash{}, err
+		}
+		if !api.b.UnprotectedAllowed() && !tx.Protected() {
+			// Ensure only eip155 signed transactions are submitted if EIP155Required is set.
+			return common.Hash{}, errors.New("only replay-protected (EIP-155) transactions allowed over RPC")
+		}
+		// Add this logging before storing
+		log.Info("SendRawTransaction: Adding to private pool",
+			"hash", tx.Hash().Hex(),
+			"nonce", tx.Nonce())
+
 		if err := api.b.AddToPrivatePool(tx); err != nil {
 			return common.Hash{}, fmt.Errorf("failed to add transaction to private pool: %v", err)
 		}
@@ -1808,10 +1827,10 @@ func (api *TransactionAPI) SendRawTransaction(ctx context.Context, input hexutil
 		}
 
 		return tx.Hash(), nil
+	} else {
+		// Default path: route to normal txpool
+		return SubmitTransaction(ctx, api.b, tx)
 	}
-
-	// Default path: route to normal txpool
-	return SubmitTransaction(ctx, api.b, tx)
 }
 
 // Sign calculates an ECDSA signature for:

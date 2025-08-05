@@ -80,10 +80,8 @@ func (w *FirewallAPIWrapper) SimulateBlock(ctx context.Context, args interface{}
 	if !ok {
 		// Try to convert from the inline~ struct we created in worker.go
 		if argsMap, ok := args.(struct {
-			ParentBlockHash interface{}                                 `json:"parentBlockHash"`
-			Timestamp       hexutil.Uint64                              `json:"timestamp"`
-			Transactions    []hexutil.Bytes                             `json:"transactions"`
-			Checkpoints     map[common.Hash]state.FullTransactionEvents `json:"checkpoints"`
+			ParentBlockHash interface{}     `json:"parentBlockHash"`
+			Transactions    []hexutil.Bytes `json:"transactions"`
 		}); ok {
 			// Type assert ParentBlockHash to the correct type
 			parentBlockHash, ok := argsMap.ParentBlockHash.(rpc.BlockNumberOrHash)
@@ -93,9 +91,7 @@ func (w *FirewallAPIWrapper) SimulateBlock(ctx context.Context, args interface{}
 
 			firewallArgs = ethapi.FirewallAPIArgs{
 				ParentBlockHash: parentBlockHash,
-				Timestamp:       argsMap.Timestamp,
 				Transactions:    argsMap.Transactions,
-				Checkpoints:     argsMap.Checkpoints,
 			}
 		} else {
 			return nil, fmt.Errorf("invalid arguments type for firewall API")
@@ -111,8 +107,6 @@ func (w *FirewallAPIWrapper) SimulateBlock(ctx context.Context, args interface{}
 	return map[string]interface{}{
 		"includedTxs": result.IncludedTxs,
 		"droppedTxs":  result.DroppedTxs,
-		"gasUsed":     result.GasUsed,
-		"stateRoot":   result.StateRoot,
 	}, nil
 }
 
@@ -135,49 +129,31 @@ func (s *Ethereum) IsIntentGuard() bool {
 
 // PrivateTxPool is a simple FIFO pool for private transactions from eth_sendRawTransaction
 type PrivateTxPool struct {
-	mu           sync.RWMutex
-	pending      map[common.Hash]*types.Transaction // tx hash -> transaction
-	order        []common.Hash                      // insertion order (FIFO)
-	maxSize      int                                // size limit
-	nonceTracker map[common.Address]uint64          // for replacement by nonce
+	mu      sync.RWMutex
+	pending map[common.Hash]*types.Transaction // tx hash -> transaction
+	order   []common.Hash                      // insertion order (FIFO)
+	maxSize int                                // size limit
 }
 
 // NewPrivateTxPool creates a new private transaction pool
 func NewPrivateTxPool(maxSize int) *PrivateTxPool {
 	return &PrivateTxPool{
-		pending:      make(map[common.Hash]*types.Transaction),
-		order:        make([]common.Hash, 0),
-		maxSize:      maxSize,
-		nonceTracker: make(map[common.Address]uint64),
+		pending: make(map[common.Hash]*types.Transaction),
+		order:   make([]common.Hash, 0),
+		maxSize: maxSize,
 	}
 }
 
-// AddTransaction adds a transaction to the private pool with validation
+// AddTransaction adds a transaction to the private pool with minimal validation
 func (p *PrivateTxPool) AddTransaction(tx *types.Transaction) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Get sender for nonce tracking
-	signer := types.LatestSignerForChainID(tx.ChainId())
-	from, err := types.Sender(signer, tx)
-	if err != nil {
-		return fmt.Errorf("invalid transaction signature: %v", err)
-	}
+	hash := tx.Hash()
 
-	// Check for nonce replacement
-	if existingNonce, exists := p.nonceTracker[from]; exists && tx.Nonce() <= existingNonce {
-		// Find and remove existing transaction with same or lower nonce
-		for i, hash := range p.order {
-			if existingTx, exists := p.pending[hash]; exists {
-				existingSigner := types.LatestSignerForChainID(existingTx.ChainId())
-				existingFrom, _ := types.Sender(existingSigner, existingTx)
-				if existingFrom == from && existingTx.Nonce() <= tx.Nonce() {
-					delete(p.pending, hash)
-					p.order = append(p.order[:i], p.order[i+1:]...)
-					break
-				}
-			}
-		}
+	// Check if transaction already exists (avoid duplicates)
+	if _, exists := p.pending[hash]; exists {
+		return fmt.Errorf("transaction %s already exists in private pool", hash.Hex())
 	}
 
 	// FIFO eviction if at capacity
@@ -187,11 +163,15 @@ func (p *PrivateTxPool) AddTransaction(tx *types.Transaction) error {
 		p.order = p.order[1:]
 	}
 
-	// Add new transaction
-	hash := tx.Hash()
+	// Add transaction as-is (SendRawTransaction already validated it)
 	p.pending[hash] = tx
 	p.order = append(p.order, hash)
-	p.nonceTracker[from] = tx.Nonce()
+
+	log.Debug("Added transaction to private pool",
+		"hash", hash.Hex(),
+		"nonce", tx.Nonce(),
+		"chainId", tx.ChainId(),
+		"poolSize", len(p.pending))
 
 	return nil
 }
@@ -208,6 +188,8 @@ func (p *PrivateTxPool) GetPendingTransactions(limit int) []*types.Transaction {
 		}
 		if tx, exists := p.pending[hash]; exists {
 			result = append(result, tx)
+		} else {
+			log.Error("Transaction not found in private pool", "hash", hash.Hex())
 		}
 	}
 	return result
@@ -812,5 +794,6 @@ func (s *Ethereum) AddToPrivatePool(tx *types.Transaction) error {
 	if s.privateTxPool == nil {
 		return fmt.Errorf("private transaction pool not initialized")
 	}
+	log.Info("Pre-private-pool", "hash", tx.Hash().Hex(), "nonce", tx.Nonce(), "chainId", tx.ChainId())
 	return s.privateTxPool.AddTransaction(tx)
 }
