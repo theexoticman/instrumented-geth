@@ -1,11 +1,15 @@
 package firewall
 
 import (
+	"encoding/hex"
 	"fmt"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/state"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/params"
 )
 
 // SimulationStatus represents the validation lifecycle of a transaction.
@@ -61,6 +65,7 @@ type TxSimulationPool struct {
 
 // NewTxSimulationPool creates and initializes a new simulation pool.
 func NewTxSimulationPool() *TxSimulationPool {
+	log.Info("Firewall: Creating new transaction simulation pool")
 	return &TxSimulationPool{
 		userSimulations:  make(map[common.Hash]state.FullTransactionEvents),
 		blockSimulations: make(map[common.Hash]state.FullTransactionEvents),
@@ -74,14 +79,84 @@ func (p *TxSimulationPool) AddUserSimulation(txHash common.Hash, simulation stat
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	log.Info("Firewall: Processing user simulation submission",
+		"txHash", txHash.Hex(),
+		"eventCount", len(simulation.EventsByContract))
+
+	// Log detailed simulation content
+	for i, contractEvent := range simulation.EventsByContract {
+		log.Info("Firewall: User simulation event details",
+			"txHash", txHash.Hex(),
+			"eventIndex", i,
+			"contractAddress", contractEvent.Address.Hex(),
+			"eventSigHash", contractEvent.ContractEvents.EventSigHash.Hex(),
+			"parameterCount", len(contractEvent.ContractEvents.Parameters))
+
+		// Log each parameter value
+		for j, param := range contractEvent.ContractEvents.Parameters {
+			log.Info("Firewall: User simulation event parameter",
+				"txHash", txHash.Hex(),
+				"eventIndex", i,
+				"parameterIndex", j,
+				"parameterValue", hex.EncodeToString(param[:]))
+		}
+	}
+
 	if _, exists := p.userSimulations[txHash]; exists {
+		log.Warn("Firewall: User simulation already exists for transaction",
+			"txHash", txHash.Hex())
 		return fmt.Errorf("user simulation for tx %s already exists", txHash.Hex())
 	}
+
 	p.userSimulations[txHash] = simulation
 	p.results[txHash] = &SimulationResult{
 		Status: StatusUserSimReceived,
 	}
+
+	log.Info("Firewall: User simulation successfully stored",
+		"txHash", txHash.Hex(),
+		"status", StatusUserSimReceived.String(),
+		"totalStoredSimulations", len(p.userSimulations))
+
 	return nil
+}
+
+// AddUserSimulationWithTx stores a user-provided simulation with transaction details for enhanced logging.
+func (p *TxSimulationPool) AddUserSimulationWithTx(tx *types.Transaction, simulation state.FullTransactionEvents, chainConfig *params.ChainConfig) error {
+	txHash := tx.Hash()
+
+	// Extract transaction details for logging
+	var fromAddr, toAddr string
+	if chainConfig != nil {
+		signer := types.LatestSignerForChainID(chainConfig.ChainID)
+		if from, err := types.Sender(signer, tx); err == nil {
+			fromAddr = from.Hex()
+		} else {
+			fromAddr = "unknown"
+			log.Warn("Firewall: Failed to derive from address", "txHash", txHash.Hex(), "error", err)
+		}
+	} else {
+		fromAddr = "no-signer"
+	}
+
+	if tx.To() != nil {
+		toAddr = tx.To().Hex()
+	} else {
+		toAddr = "contract-creation"
+	}
+
+	log.Info("Firewall: 🎯 USER SIMULATION FOUND! Processing transaction with full details",
+		"txHash", txHash.Hex(),
+		"from", fromAddr,
+		"to", toAddr,
+		"value", tx.Value().String(),
+		"gasLimit", tx.Gas(),
+		"gasPrice", tx.GasPrice().String(),
+		"nonce", tx.Nonce(),
+		"type", tx.Type(),
+		"eventCount", len(simulation.EventsByContract))
+
+	return p.AddUserSimulation(txHash, simulation)
 }
 
 // IsUserSimulated checks if a transaction has a user-provided simulation and is
@@ -89,13 +164,36 @@ func (p *TxSimulationPool) AddUserSimulation(txHash common.Hash, simulation stat
 func (p *TxSimulationPool) ShouldSimulateInBlock(txHash common.Hash) bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+
 	_, exists := p.results[txHash]
+
+	log.Info("Firewall: Checking if transaction should be simulated in block",
+		"txHash", txHash.Hex(),
+		"shouldSimulate", exists,
+		"totalTrackedTxs", len(p.results))
+
 	return exists
 }
 
 func (p *TxSimulationPool) IsTransactionSafe(txHash common.Hash, blockFTE state.FullTransactionEvents) (*SimulationResult, error) {
-	return p.compareAndStoreResult(txHash, blockFTE)
+	log.Info("Firewall: 🛡️ Starting transaction safety validation",
+		"txHash", txHash.Hex())
 
+	result, err := p.compareAndStoreResult(txHash, blockFTE)
+
+	if err != nil {
+		log.Error("Firewall:  Transaction safety validation failed",
+			"txHash", txHash.Hex(),
+			"error", err.Error())
+	} else if result != nil {
+		log.Info("Firewall:  Transaction safety validation completed",
+			"txHash", txHash.Hex(),
+			"status", result.Status.String(),
+			"match", result.Match,
+			"reason", result.Reason)
+	}
+
+	return result, err
 }
 
 // CompareAndStoreResult fetches a user-provided simulation, compares it against a
@@ -105,30 +203,61 @@ func (p *TxSimulationPool) compareAndStoreResult(txHash common.Hash, blockFTE st
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	log.Info("Firewall: 🔍 Starting detailed simulation comparison",
+		"txHash", txHash.Hex(),
+		"blockEventCount", len(blockFTE.EventsByContract))
+
 	userFTE, exists := p.userSimulations[txHash]
 	if !exists {
+		log.Error("Firewall:  User simulation not found for transaction",
+			"txHash", txHash.Hex(),
+			"availableSimulations", len(p.userSimulations))
 		return nil, fmt.Errorf("user simulation for tx %s not found", txHash.Hex())
 	}
+
+	log.Info("Firewall: 📊 Found user simulation for comparison",
+		"txHash", txHash.Hex(),
+		"userEventCount", len(userFTE.EventsByContract),
+		"blockEventCount", len(blockFTE.EventsByContract))
 
 	result, exists := p.results[txHash]
 	if !exists {
 		// This case should ideally not happen if IsUserSimulated is checked first,
 		// but we handle it defensively.
+		log.Error("Firewall:  Internal state inconsistency - result entry not found",
+			"txHash", txHash.Hex())
 		return nil, fmt.Errorf("internal state inconsistency: result entry for tx %s not found", txHash.Hex())
 	}
+
 	// Store the block-level simulation for tracking and debugging.
 	p.blockSimulations[txHash] = blockFTE
 
-	areSimilar, err := CompareTxEvents(userFTE, blockFTE)
+	log.Info("Firewall: 🔬 Beginning deep event comparison",
+		"txHash", txHash.Hex())
+
+	areSimilar, err := CompareTxEvents(userFTE, blockFTE, txHash)
 	if areSimilar {
 		result.Status = StatusMatch
 		result.Match = true
 		result.Reason = ""
+		log.Info("Firewall:   SIMULATION MATCH! Transaction is safe",
+			"txHash", txHash.Hex(),
+			"status", result.Status.String())
 	} else {
 		result.Status = StatusMismatch
 		result.Match = false
 		result.Reason = err.Error()
+		log.Warn("Firewall:   SIMULATION MISMATCH! Transaction is potentially malicious",
+			"txHash", txHash.Hex(),
+			"status", result.Status.String(),
+			"mismatchReason", result.Reason)
 	}
+
+	log.Info("Firewall:  Pool statistics after comparison",
+		"txHash", txHash.Hex(),
+		"totalUserSimulations", len(p.userSimulations),
+		"totalBlockSimulations", len(p.blockSimulations),
+		"totalResults", len(p.results))
 
 	// For a production system, a cleanup mechanism (e.g., based on block progression)
 	// would be needed to prevent this map from growing indefinitely. For the demo,
@@ -146,8 +275,17 @@ func (p *TxSimulationPool) GetResult(txHash common.Hash) (*SimulationResult, boo
 
 	result, exists := p.results[txHash]
 	if !exists {
+		log.Debug("Firewall: No result found for transaction",
+			"txHash", txHash.Hex())
 		return nil, false
 	}
+
+	log.Info("Firewall: Retrieved validation result",
+		"txHash", txHash.Hex(),
+		"status", result.Status.String(),
+		"match", result.Match,
+		"reason", result.Reason)
+
 	// Return a copy to prevent race conditions on the returned struct.
 	resCopy := *result
 	return &resCopy, true
@@ -159,65 +297,191 @@ func (p *TxSimulationPool) GetStatus(txHash common.Hash) SimulationStatus {
 	defer p.mu.RUnlock()
 
 	if result, exists := p.results[txHash]; exists {
+		log.Debug("Firewall: Retrieved transaction status",
+			"txHash", txHash.Hex(),
+			"status", result.Status.String())
 		return result.Status
 	}
+
+	log.Debug("Firewall: Transaction not seen by firewall",
+		"txHash", txHash.Hex(),
+		"status", StatusNotSeen.String())
 	return StatusNotSeen
 }
 
 // compareTxEvents checks if two sets of full transaction events are equivalent.
 // It is a helper function and is not thread-safe; callers must hold the lock.
-func CompareTxEvents(userFTE, blockFTE state.FullTransactionEvents) (bool, error) {
+func CompareTxEvents(userFTE, blockFTE state.FullTransactionEvents, txHash common.Hash) (bool, error) {
+	log.Info("Firewall: 🔬 Starting comprehensive event comparison",
+		"txHash", txHash.Hex(),
+		"userEventCount", len(userFTE.EventsByContract),
+		"blockEventCount", len(blockFTE.EventsByContract))
+
 	// 1. Verify that the total number of events emitted is the same.
 	if len(userFTE.EventsByContract) != len(blockFTE.EventsByContract) {
-		return false, fmt.Errorf("event count mismatch: user simulation has %d events, block simulation has %d",
+		mismatchMsg := fmt.Sprintf("event count mismatch: user simulation has %d events, block simulation has %d",
 			len(userFTE.EventsByContract), len(blockFTE.EventsByContract))
+
+		log.Warn("Firewall:  Event count mismatch detected",
+			"txHash", txHash.Hex(),
+			"userEventCount", len(userFTE.EventsByContract),
+			"blockEventCount", len(blockFTE.EventsByContract),
+			"mismatch", mismatchMsg)
+
+		return false, fmt.Errorf(mismatchMsg)
 	}
+
+	log.Info("Firewall:  Event count match confirmed",
+		"txHash", txHash.Hex(),
+		"eventCount", len(userFTE.EventsByContract))
 
 	// 2. Compare each event in order of execution.
 	for i := 0; i < len(userFTE.EventsByContract); i++ {
 		userContractEvent := userFTE.EventsByContract[i]
 		blockContractEvent := blockFTE.EventsByContract[i]
 
-		if ok, err := compareContractEvent(userContractEvent, blockContractEvent); !ok {
-			return false, fmt.Errorf("mismatch at event index %d: %v", i, err)
+		log.Info("Firewall: 🔍 Comparing individual event",
+			"txHash", txHash.Hex(),
+			"eventIndex", i,
+			"userContractAddr", userContractEvent.Address.Hex(),
+			"blockContractAddr", blockContractEvent.Address.Hex(),
+			"userEventSig", userContractEvent.ContractEvents.EventSigHash.Hex(),
+			"blockEventSig", blockContractEvent.ContractEvents.EventSigHash.Hex())
+
+		if ok, err := compareContractEvent(userContractEvent, blockContractEvent, txHash, i); !ok {
+			mismatchMsg := fmt.Sprintf("mismatch at event index %d: %v", i, err)
+			log.Warn("Firewall:  Event mismatch found",
+				"txHash", txHash.Hex(),
+				"eventIndex", i,
+				"mismatch", mismatchMsg,
+				"detailedError", err.Error())
+			return false, fmt.Errorf(mismatchMsg)
 		}
+
+		log.Info("Firewall:  Event match confirmed",
+			"txHash", txHash.Hex(),
+			"eventIndex", i)
 	}
+
+	log.Info("Firewall:  ALL EVENTS MATCH! Complete validation success",
+		"txHash", txHash.Hex(),
+		"totalEventsCompared", len(userFTE.EventsByContract))
 
 	return true, nil
 }
 
 // compareContractEvent checks if two individual contract events are equivalent.
 // It compares the emitting contract's address and the event data itself.
-func compareContractEvent(userCE, blockCE state.ContractEvents) (bool, error) {
+func compareContractEvent(userCE, blockCE state.ContractEvents, txHash common.Hash, eventIndex int) (bool, error) {
+	log.Info("Firewall: 🏢 Comparing contract event details",
+		"txHash", txHash.Hex(),
+		"eventIndex", eventIndex,
+		"userAddress", userCE.Address.Hex(),
+		"blockAddress", blockCE.Address.Hex())
+
 	// 1. Compare the address of the contract that emitted the event.
 	if userCE.Address != blockCE.Address {
-		return false, fmt.Errorf("contract address mismatch: expected %s, got %s", userCE.Address.Hex(), blockCE.Address.Hex())
+		mismatchMsg := fmt.Sprintf("contract address mismatch: expected %s, got %s", userCE.Address.Hex(), blockCE.Address.Hex())
+		log.Warn("Firewall:  Contract address mismatch",
+			"txHash", txHash.Hex(),
+			"eventIndex", eventIndex,
+			"expectedAddress", userCE.Address.Hex(),
+			"actualAddress", blockCE.Address.Hex(),
+			"mismatch", mismatchMsg)
+		return false, fmt.Errorf(mismatchMsg)
 	}
 
+	log.Info("Firewall:  Contract address match confirmed",
+		"txHash", txHash.Hex(),
+		"eventIndex", eventIndex,
+		"contractAddress", userCE.Address.Hex())
+
 	// 2. Compare the content of the event.
-	return compareEventData(userCE.ContractEvents, blockCE.ContractEvents)
+	return compareEventData(userCE.ContractEvents, blockCE.ContractEvents, txHash, eventIndex)
 }
 
 // compareEventData checks if two event data payloads are equivalent.
 // It compares the event signature hash and all of the event parameters.
-func compareEventData(userED, blockED state.EventData) (bool, error) {
+func compareEventData(userED, blockED state.EventData, txHash common.Hash, eventIndex int) (bool, error) {
+	log.Info("Firewall: 📊 Comparing event data in detail",
+		"txHash", txHash.Hex(),
+		"eventIndex", eventIndex,
+		"userEventSig", userED.EventSigHash.Hex(),
+		"blockEventSig", blockED.EventSigHash.Hex(),
+		"userParamCount", len(userED.Parameters),
+		"blockParamCount", len(blockED.Parameters))
+
 	// 1. Compare the event signature hash.
 	if userED.EventSigHash != blockED.EventSigHash {
-		return false, fmt.Errorf("event signature hash mismatch: expected %s, got %s", userED.EventSigHash.Hex(), blockED.EventSigHash.Hex())
+		mismatchMsg := fmt.Sprintf("event signature hash mismatch: expected %s, got %s", userED.EventSigHash.Hex(), blockED.EventSigHash.Hex())
+		log.Warn("Firewall:  Event signature hash mismatch",
+			"txHash", txHash.Hex(),
+			"eventIndex", eventIndex,
+			"expectedSigHash", userED.EventSigHash.Hex(),
+			"actualSigHash", blockED.EventSigHash.Hex(),
+			"mismatch", mismatchMsg)
+		return false, fmt.Errorf(mismatchMsg)
 	}
+
+	log.Info("Firewall:  Event signature hash match confirmed",
+		"txHash", txHash.Hex(),
+		"eventIndex", eventIndex,
+		"eventSigHash", userED.EventSigHash.Hex())
 
 	// 2. Compare the number of parameters.
 	if len(userED.Parameters) != len(blockED.Parameters) {
-		return false, fmt.Errorf("event parameter count mismatch for event %s: expected %d, got %d",
+		mismatchMsg := fmt.Sprintf("event parameter count mismatch for event %s: expected %d, got %d",
 			userED.EventSigHash.Hex(), len(userED.Parameters), len(blockED.Parameters))
+		log.Warn("Firewall:  Parameter count mismatch",
+			"txHash", txHash.Hex(),
+			"eventIndex", eventIndex,
+			"eventSigHash", userED.EventSigHash.Hex(),
+			"expectedParamCount", len(userED.Parameters),
+			"actualParamCount", len(blockED.Parameters),
+			"mismatch", mismatchMsg)
+		return false, fmt.Errorf(mismatchMsg)
 	}
+
+	log.Info("Firewall:  Parameter count match confirmed",
+		"txHash", txHash.Hex(),
+		"eventIndex", eventIndex,
+		"parameterCount", len(userED.Parameters))
 
 	// 3. Compare each parameter value.
 	for i := 0; i < len(userED.Parameters); i++ {
+		log.Info("Firewall: 🔍 Comparing parameter",
+			"txHash", txHash.Hex(),
+			"eventIndex", eventIndex,
+			"parameterIndex", i,
+			"userParam", hex.EncodeToString(userED.Parameters[i][:]),
+			"blockParam", hex.EncodeToString(blockED.Parameters[i][:]))
+
 		if userED.Parameters[i] != blockED.Parameters[i] {
-			return false, fmt.Errorf("event parameter mismatch at index %d for event %s", i, userED.EventSigHash.Hex())
+			mismatchMsg := fmt.Sprintf("event parameter mismatch at index %d for event %s: expected %s, got %s",
+				i, userED.EventSigHash.Hex(), hex.EncodeToString(userED.Parameters[i][:]), hex.EncodeToString(blockED.Parameters[i][:]))
+			log.Warn("Firewall:  Parameter value mismatch",
+				"txHash", txHash.Hex(),
+				"eventIndex", eventIndex,
+				"parameterIndex", i,
+				"eventSigHash", userED.EventSigHash.Hex(),
+				"expectedParam", hex.EncodeToString(userED.Parameters[i][:]),
+				"actualParam", hex.EncodeToString(blockED.Parameters[i][:]),
+				"mismatch", mismatchMsg)
+			return false, fmt.Errorf(mismatchMsg)
 		}
+
+		log.Info("Firewall:  Parameter match confirmed",
+			"txHash", txHash.Hex(),
+			"eventIndex", eventIndex,
+			"parameterIndex", i,
+			"parameterValue", hex.EncodeToString(userED.Parameters[i][:]))
 	}
+
+	log.Info("Firewall:  ALL PARAMETERS MATCH! Event data validation successful",
+		"txHash", txHash.Hex(),
+		"eventIndex", eventIndex,
+		"eventSigHash", userED.EventSigHash.Hex(),
+		"totalParametersCompared", len(userED.Parameters))
 
 	return true, nil
 }
