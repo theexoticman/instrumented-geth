@@ -82,13 +82,13 @@ func (p *TxSimulationPool) AddUserSimulation(canonicalId common.Hash, simulation
 	defer p.mu.Unlock()
 
 	log.Info("Firewall: Processing user simulation submission",
-		"txHash", canonicalId.Hex(),
+		"canonicalID", canonicalId.Hex(),
 		"eventCount", len(simulation.EventsByContract))
 
 	// Log detailed simulation content
 	for i, contractEvent := range simulation.EventsByContract {
 		log.Info("Firewall: User simulation event details",
-			"txHash", canonicalId.Hex(),
+			"canonicalID", canonicalId.Hex(),
 			"eventIndex", i,
 			"contractAddress", contractEvent.Address.Hex(),
 			"eventSigHash", contractEvent.ContractEvents.EventSigHash.Hex(),
@@ -97,7 +97,7 @@ func (p *TxSimulationPool) AddUserSimulation(canonicalId common.Hash, simulation
 		// Log each parameter value
 		for j, param := range contractEvent.ContractEvents.Parameters {
 			log.Info("Firewall: User simulation event parameter",
-				"txHash", canonicalId.Hex(),
+				"canonicalID", canonicalId.Hex(),
 				"eventIndex", i,
 				"parameterIndex", j,
 				"parameterValue", hex.EncodeToString(param[:]))
@@ -106,7 +106,7 @@ func (p *TxSimulationPool) AddUserSimulation(canonicalId common.Hash, simulation
 
 	if _, exists := p.userSimulations[canonicalId]; exists {
 		log.Warn("Firewall: User simulation already exists for transaction",
-			"txHash", canonicalId.Hex())
+			"canonicalID", canonicalId.Hex())
 		return fmt.Errorf("user simulation for tx %s already exists", canonicalId.Hex())
 	}
 
@@ -116,7 +116,7 @@ func (p *TxSimulationPool) AddUserSimulation(canonicalId common.Hash, simulation
 	}
 
 	log.Info("Firewall: User simulation successfully stored",
-		"txHash", canonicalId.Hex(),
+		"canonicalID", canonicalId.Hex(),
 		"status", StatusUserSimReceived.String(),
 		"totalStoredSimulations", len(p.userSimulations))
 
@@ -125,11 +125,11 @@ func (p *TxSimulationPool) AddUserSimulation(canonicalId common.Hash, simulation
 
 // IsUserSimulated checks if a transaction has a user-provided simulation and is
 // intended to be protected by the firewall. This is called by the miner.
-func (p *TxSimulationPool) ShouldSimulateInBlock(txHash common.Hash) bool {
+func (p *TxSimulationPool) ShouldSimulateInBlock(canonicalID common.Hash, txHash common.Hash) bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	_, exists := p.results[txHash]
+	_, exists := p.results[canonicalID]
 	if !exists {
 		// Log a small sample of tracked hashes to debug mismatches
 		sample := make([]string, 0, 5)
@@ -142,26 +142,29 @@ func (p *TxSimulationPool) ShouldSimulateInBlock(txHash common.Hash) bool {
 			i++
 		}
 		log.Info("Firewall: ShouldSimulateInBlock MISS",
-			"txHash", txHash.Hex(),
+			"txhash", txHash.Hex(),
+			"canonicalID", canonicalID.Hex(),
 			"tracked", len(p.results),
 			"sampleTracked", sample)
 	} else {
 		log.Info("Firewall: ShouldSimulateInBlock HIT",
-			"txHash", txHash.Hex(),
+			"txhash", txHash.Hex(),
+			"canonicalID", canonicalID.Hex(),
 			"tracked", len(p.results))
 	}
 	return exists
 }
 
 // IsTransactionSafe checks the tx against the stored simulation using canonical ID.
-func (p *TxSimulationPool) IsTransactionSafe(canonicalID common.Hash, blockFTE state.FullTransactionEvents) (*SimulationResult, error) {
+func (p *TxSimulationPool) IsTransactionSafe(canonicalID common.Hash, blockFTE state.FullTransactionEvents, txHash common.Hash) (*SimulationResult, error) {
 	log.Info("Firewall: Starting transaction safety validation", "canonicalID", canonicalID.Hex())
 
-	result, err := p.compareAndStoreResult(canonicalID, blockFTE)
+	result, err := p.compareAndStoreResult(canonicalID, blockFTE, txHash)
 	if err != nil {
 		log.Error("Firewall:  Transaction safety validation failed", "canonicalID", canonicalID.Hex(), "error", err.Error())
 	} else if result != nil {
 		log.Info("Firewall:  Transaction safety validation completed",
+			"txhash", txHash.Hex(),
 			"canonicalID", canonicalID.Hex(),
 			"status", result.Status.String(),
 			"match", result.Match,
@@ -171,23 +174,26 @@ func (p *TxSimulationPool) IsTransactionSafe(canonicalID common.Hash, blockFTE s
 }
 
 // compareAndStoreResult fetches the user-provided simulation by canonical ID.
-func (p *TxSimulationPool) compareAndStoreResult(canonicalID common.Hash, blockFTE state.FullTransactionEvents) (*SimulationResult, error) {
+func (p *TxSimulationPool) compareAndStoreResult(canonicalID common.Hash, blockFTE state.FullTransactionEvents, txHash common.Hash) (*SimulationResult, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	log.Info("Firewall:  Starting detailed simulation comparison",
+		"txhash", txHash.Hex(),
 		"canonicalID", canonicalID.Hex(),
 		"blockEventCount", len(blockFTE.EventsByContract))
 
 	userFTE, exists := p.userSimulations[canonicalID]
 	if !exists {
 		log.Error("Firewall:  User simulation not found for transaction",
+			"txhash", txHash.Hex(),
 			"canonicalID", canonicalID.Hex(),
 			"availableSimulations", len(p.userSimulations))
 		return nil, fmt.Errorf("user simulation for canonicalID %s not found", canonicalID.Hex())
 	}
 
 	log.Info("Firewall: 📊 Found user simulation for comparison",
+		"txhash", txHash.Hex(),
 		"canonicalID", canonicalID.Hex(),
 		"userEventCount", len(userFTE.EventsByContract),
 		"blockEventCount", len(blockFTE.EventsByContract))
@@ -195,6 +201,7 @@ func (p *TxSimulationPool) compareAndStoreResult(canonicalID common.Hash, blockF
 	result, exists := p.results[canonicalID]
 	if !exists {
 		log.Error("Firewall:  Internal state inconsistency - result entry not found",
+			"txhash", txHash.Hex(),
 			"canonicalID", canonicalID.Hex())
 		return nil, fmt.Errorf("internal state inconsistency: result entry for canonicalID %s not found", canonicalID.Hex())
 	}
@@ -202,9 +209,12 @@ func (p *TxSimulationPool) compareAndStoreResult(canonicalID common.Hash, blockF
 	// Track block-level FTE
 	p.blockSimulations[canonicalID] = blockFTE
 
-	log.Info("Firewall: 🔬 Beginning deep event comparison", "canonicalID", canonicalID.Hex())
+	log.Info(
+		"Firewall: 🔬 Beginning deep event comparison",
+		"txHash", txHash.Hex(),
+		"canonicalID", canonicalID.Hex())
 
-	areSimilar, err := CompareTxEvents(userFTE, blockFTE, canonicalID)
+	areSimilar, err := CompareTxEvents(userFTE, blockFTE, canonicalID, txHash)
 	if areSimilar {
 		result.Status = StatusMatch
 		result.Match = true
@@ -219,6 +229,7 @@ func (p *TxSimulationPool) compareAndStoreResult(canonicalID common.Hash, blockF
 	}
 
 	log.Info("Firewall:  Pool statistics after comparison",
+		"txhash", txHash.Hex(),
 		"canonicalID", canonicalID.Hex(),
 		"totalUserSimulations", len(p.userSimulations),
 		"totalBlockSimulations", len(p.blockSimulations),
@@ -229,6 +240,9 @@ func (p *TxSimulationPool) compareAndStoreResult(canonicalID common.Hash, blockF
 
 // GetResult retrieves the final validation result for a transaction.
 // This can be used by a debug API to return the mismatch reason.
+// TODO for us to get the block simulation result, it is important we add the real txhash in the store during block simulation
+// it is not the case for now.
+// also we need to create the api endpoint to get block simulation result.
 func (p *TxSimulationPool) GetResult(txHash common.Hash) (*SimulationResult, bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -268,15 +282,16 @@ func (p *TxSimulationPool) GetStatus(txHash common.Hash) SimulationStatus {
 		"status", StatusNotSeen.String())
 	return StatusNotSeen
 }
-func CompareTxEvents(userFTE, blockFTE state.FullTransactionEvents, txHash common.Hash) (bool, error) {
+func CompareTxEvents(userFTE, blockFTE state.FullTransactionEvents, canonicalID common.Hash, txHash common.Hash) (bool, error) {
 	// Apply filters first
 	origUserCount := len(userFTE.EventsByContract)
 	origBlockCount := len(blockFTE.EventsByContract)
 	userFTE = filterFTE(userFTE)
 	blockFTE = filterFTE(blockFTE)
 
-	log.Info("Firewall: 🔬 Starting comprehensive event comparison (filtered)",
+	log.Info("Firewall: Starting comprehensive event comparison (filtered)",
 		"txHash", txHash.Hex(),
+		"canonicalID", canonicalID.Hex(),
 		"userEventCount", len(userFTE.EventsByContract),
 		"blockEventCount", len(blockFTE.EventsByContract),
 		"userFiltered", origUserCount-len(userFTE.EventsByContract),
@@ -289,6 +304,7 @@ func CompareTxEvents(userFTE, blockFTE state.FullTransactionEvents, txHash commo
 
 		log.Warn("Firewall:  Event count mismatch detected",
 			"txHash", txHash.Hex(),
+			"canonicalID", canonicalID.Hex(),
 			"userEventCount", len(userFTE.EventsByContract),
 			"blockEventCount", len(blockFTE.EventsByContract),
 			"mismatch", mismatchMsg)
@@ -298,6 +314,7 @@ func CompareTxEvents(userFTE, blockFTE state.FullTransactionEvents, txHash commo
 
 	log.Info("Firewall:  Event count match confirmed",
 		"txHash", txHash.Hex(),
+		"canonicalID", canonicalID.Hex(),
 		"eventCount", len(userFTE.EventsByContract))
 
 	// 2. Compare each event in order of execution.
@@ -306,7 +323,8 @@ func CompareTxEvents(userFTE, blockFTE state.FullTransactionEvents, txHash commo
 		blockContractEvent := blockFTE.EventsByContract[i]
 
 		log.Info("Firewall:  Comparing individual event",
-			"txHash", txHash.Hex(),
+			"txhash", txHash.Hex(),
+			"canonicalID", canonicalID.Hex(),
 			"eventIndex", i,
 			"userContractAddr", userContractEvent.Address.Hex(),
 			"blockContractAddr", blockContractEvent.Address.Hex(),
@@ -316,7 +334,8 @@ func CompareTxEvents(userFTE, blockFTE state.FullTransactionEvents, txHash commo
 		if ok, err := compareContractEvent(userContractEvent, blockContractEvent, txHash, i); !ok {
 			mismatchMsg := fmt.Sprintf("mismatch at event index %d: %v", i, err)
 			log.Warn("Firewall:  Event mismatch found",
-				"txHash", txHash.Hex(),
+				"txhash", txHash.Hex(),
+				"canonicalID", canonicalID.Hex(),
 				"eventIndex", i,
 				"mismatch", mismatchMsg,
 				"detailedError", err.Error())
@@ -324,12 +343,14 @@ func CompareTxEvents(userFTE, blockFTE state.FullTransactionEvents, txHash commo
 		}
 
 		log.Info("Firewall:  Event match confirmed",
-			"txHash", txHash.Hex(),
+			"txhash", txHash.Hex(),
+			"canonicalID", canonicalID.Hex(),
 			"eventIndex", i)
 	}
 
 	log.Info("Firewall:  ALL EVENTS MATCH! Complete validation success",
-		"txHash", txHash.Hex(),
+		"txhash", txHash.Hex(),
+		"canonicalID", canonicalID.Hex(),
 		"totalEventsCompared", len(userFTE.EventsByContract))
 
 	return true, nil

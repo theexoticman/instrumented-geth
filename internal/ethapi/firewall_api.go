@@ -137,10 +137,10 @@ func (api *FirewallAPI) SimulateBlock(ctx context.Context, args FirewallAPIArgs)
 		txCanonicalID := firewall.CanonicalTxID(tx, api.backend.ChainConfig(), header)
 
 		// 4a. Check if this transaction requires firewall validation
-		shouldSimulate := api.backend.TxSimulationPool().ShouldSimulateInBlock(txCanonicalID)
+		shouldSimulate := api.backend.TxSimulationPool().ShouldSimulateInBlock(txCanonicalID, txHash)
 		snapshot := statedb.Snapshot()
 		if shouldSimulate {
-			log.Info("Firewall validation required", "index", i, "hash", txHash, "canonicalID", txCanonicalID)
+			log.Info("Firewall validation required", "index", i, "txHash", txHash, "canonicalID", txCanonicalID)
 			tracer := NewEventTracer(parentHeader.Number.Uint64())
 			vmConfig := vm.Config{Tracer: tracer.GetHooks()}
 
@@ -160,17 +160,24 @@ func (api *FirewallAPI) SimulateBlock(ctx context.Context, args FirewallAPIArgs)
 				continue
 			}
 
-			// blockFTE := tracer.GetEvents()
-			if _, err := api.backend.TxSimulationPool().IsTransactionSafe(txCanonicalID, tracer.fullTxEvents); err != nil {
-				reason := fmt.Sprintf("Firewall validation failed: %v", err)
+			blockFTE := tracer.GetEvents()
+			result := &firewall.SimulationResult{}
+			if result, err = api.backend.TxSimulationPool().IsTransactionSafe(txCanonicalID, blockFTE, txHash); err != nil {
+				reason := fmt.Sprintf("Error while evaluating if user transaciton is safe: %v", err)
 
 				statedb.RevertToSnapshot(snapshot)
-				log.Info("Dropping tx", "index", i, "hash", txHash, "canonicalID", txCanonicalID, "reason", reason)
+				log.Info("Dropping tx", "index", i, "txhash", txHash, "canonicalID", txCanonicalID, "reason", reason)
+				droppedTxs = append(droppedTxs, &DroppedTxInfo{Hash: txHash, Reason: reason})
+			}
+			if !result.Match {
+				reason := fmt.Sprintf("Firewall validation failed: %v", result.Reason)
+				statedb.RevertToSnapshot(snapshot)
+				log.Info("Dropping tx", "index", i, "txhash", txHash, "canonicalID", txCanonicalID, "reason", reason)
 				droppedTxs = append(droppedTxs, &DroppedTxInfo{Hash: txHash, Reason: reason})
 			} else {
 				// execution didnt fail
 				// tx similar to what user wanted.
-				log.Info("Firewall validation successful", "index", i, "hash", txHash, "canonicalID", txCanonicalID)
+				log.Info("Firewall validation successful", "index", i, "txHash", txHash, "canonicalID", txCanonicalID)
 				includedTxs = append(includedTxs, tx)
 			}
 		} else {
