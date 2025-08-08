@@ -891,3 +891,12 @@ func (ec *Client) RemoveTransaction(ctx context.Context, txHash common.Hash) (bo
 	}
 	return result, nil
 }
+
+// GetQuarantineReason queries firewall_getQuarantineReason using the canonical tx id.
+func (ec *Client) GetQuarantineReason(ctx context.Context, canonicalID common.Hash) (*ethapi.QuarantineReasonResult, error) {
+	var result ethapi.QuarantineReasonResult
+	if err := ec.c.CallContext(ctx, &result, "firewall_getQuarantineReason", canonicalID); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
