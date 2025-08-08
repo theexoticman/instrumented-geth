@@ -9,6 +9,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/firewall"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/log"
@@ -129,13 +130,17 @@ func (api *FirewallAPI) SimulateBlock(ctx context.Context, args FirewallAPIArgs)
 
 	// 4. Sequentially process transactions
 	for i, tx := range txs {
+		// canonical id is the tx identification mechanism used by the firewall
+		// we cannot use tx hash for the firewall
+		// tx hash only used for logging
 		txHash := tx.Hash()
+		txCanonicalID := firewall.CanonicalTxID(tx, api.backend.ChainConfig(), header)
 
 		// 4a. Check if this transaction requires firewall validation
-		shouldSimulate := api.backend.TxSimulationPool().ShouldSimulateInBlock(txHash)
+		shouldSimulate := api.backend.TxSimulationPool().ShouldSimulateInBlock(txCanonicalID)
 		snapshot := statedb.Snapshot()
 		if shouldSimulate {
-			log.Info("Firewall validation required", "index", i, "hash", txHash)
+			log.Info("Firewall validation required", "index", i, "hash", txHash, "canonicalID", txCanonicalID)
 			tracer := NewEventTracer(parentHeader.Number.Uint64())
 			vmConfig := vm.Config{Tracer: tracer.GetHooks()}
 
@@ -150,7 +155,7 @@ func (api *FirewallAPI) SimulateBlock(ctx context.Context, args FirewallAPIArgs)
 			// Apply the transaction using the EVM-centric function.
 			_, err := core.ApplyTransaction(evm, simGasPool, simState, header, tx, &header.GasUsed)
 			if err != nil {
-				log.Warn("Firewall tx failed pre-simulation, dropping", "index", i, "hash", txHash, "err", err)
+				log.Warn("Firewall tx failed pre-simulation, dropping", "index", i, "hash", txHash, "canonicalID", txCanonicalID, "err", err)
 				droppedTxs = append(droppedTxs, &DroppedTxInfo{Hash: txHash, Reason: fmt.Sprintf("Pre-simulation failed: %v", err)})
 				continue
 			}
@@ -163,12 +168,12 @@ func (api *FirewallAPI) SimulateBlock(ctx context.Context, args FirewallAPIArgs)
 					reason = fmt.Sprintf("Firewall validation failed: %v", compareErr)
 				}
 				statedb.RevertToSnapshot(snapshot)
-				log.Info("Dropping tx", "index", i, "hash", txHash, "reason", reason)
+				log.Info("Dropping tx", "index", i, "hash", txHash, "canonicalID", txCanonicalID, "reason", reason)
 				droppedTxs = append(droppedTxs, &DroppedTxInfo{Hash: txHash, Reason: reason})
 			} else {
 				// execution didnt fail
 				// tx similar to what user wanted.
-				log.Info("Firewall validation successful", "index", i, "hash", txHash)
+				log.Info("Firewall validation successful", "index", i, "hash", txHash, "canonicalID", txCanonicalID)
 				includedTxs = append(includedTxs, tx)
 			}
 		} else {
@@ -179,7 +184,7 @@ func (api *FirewallAPI) SimulateBlock(ctx context.Context, args FirewallAPIArgs)
 			_, err = core.ApplyTransaction(evm, gasPool, statedb, header, tx, &header.GasUsed)
 			if err != nil {
 				// error so we revert to the snapshot
-				log.Warn("Transaction failed during main simulation, dropping", "index", i, "hash", txHash, "err", err)
+				log.Warn("Transaction failed during main simulation, dropping", "index", i, "hash", txHash, "canonicalID", txCanonicalID, "err", err)
 				// droppedTxs = append(droppedTxs, &DroppedTxInfo{Hash: txHash, Reason: fmt.Sprintf("Execution failed: %v", err)})
 				statedb.RevertToSnapshot(snapshot)
 				droppedTxs = append(droppedTxs, &DroppedTxInfo{Hash: txHash, Reason: "Tx Execution failed in the EVM, error: " + err.Error()})

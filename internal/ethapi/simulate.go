@@ -30,6 +30,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/firewall"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
@@ -188,6 +189,62 @@ func (sim *simulator) execute(ctx context.Context, blocks []simBlock) ([]*state.
 		headers[bi] = result.Header()
 
 		results[bi] = &state.SimBlockResult{
+			FullTx:      sim.fullTx,
+			ChainConfig: sim.chainConfig,
+			Block:       result,
+			Calls:       callResults,
+			Receipts:    receipts, // Store receipts
+			Senders:     senders,  // Store senders
+		}
+
+		parent = result.Header()
+
+	}
+	return results, nil
+}
+
+// execute runs the simulation of a series of blocks.
+func (sim *simulator) executeIPSP(ctx context.Context, blocks []simBlock) ([]*state.SimBlockResultIPSP, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var (
+		cancel  context.CancelFunc
+		timeout = sim.b.RPCEVMTimeout()
+	)
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+	} else {
+		ctx, cancel = context.WithCancel(ctx)
+	}
+	// Make sure the context is cancelled when the call has completed
+	// this makes sure resources are cleaned up.
+	defer cancel()
+
+	var err error
+	blocks, err = sim.sanitizeChain(blocks)
+	if err != nil {
+		return nil, err
+	}
+	// Prepare block headers with preliminary fields for the response.
+	headers, err := sim.makeHeaders(blocks)
+	if err != nil {
+		return nil, err
+	}
+	var (
+		results = make([]*state.SimBlockResultIPSP, len(blocks))
+		parent  = sim.base
+	)
+	for bi, block := range blocks {
+
+		result, callResults, receipts, senders, err := sim.processBlockIPSP(ctx, &block, headers[bi], parent, headers[:bi], timeout)
+
+		if err != nil {
+			return nil, err
+		}
+		headers[bi] = result.Header()
+
+		results[bi] = &state.SimBlockResultIPSP{
 			FullTx:      sim.fullTx,
 			ChainConfig: sim.chainConfig,
 			Block:       result,
@@ -366,10 +423,186 @@ func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header,
 
 }
 
+func (sim *simulator) processBlockIPSP(ctx context.Context, block *simBlock, header, parent *types.Header, headers []*types.Header, timeout time.Duration) (*types.Block, []state.SimCallResultIPSP, []*types.Receipt, map[common.Hash]common.Address, error) {
+	// Set header fields that depend only on parent block.
+	// Parent hash is needed for evm.GetHashFn to work.
+	header.ParentHash = parent.Hash()
+	if sim.chainConfig.IsLondon(header.Number) {
+		// In non-validation mode base fee is set to 0 if it is not overridden.
+		// This is because it creates an edge case in EVM where gasPrice < baseFee.
+		// Base fee could have been overridden.
+		if header.BaseFee == nil {
+			if sim.validate {
+				header.BaseFee = eip1559.CalcBaseFee(sim.chainConfig, parent)
+			} else {
+				header.BaseFee = big.NewInt(0)
+			}
+		}
+	}
+	if sim.chainConfig.IsCancun(header.Number, header.Time) {
+		var excess uint64
+		if sim.chainConfig.IsCancun(parent.Number, parent.Time) {
+			excess = eip4844.CalcExcessBlobGas(sim.chainConfig, parent, header.Time)
+		}
+		header.ExcessBlobGas = &excess
+	}
+	blockContext := core.NewEVMBlockContext(header, sim.newSimulatedChainContext(ctx, headers), nil)
+	if block.BlockOverrides.BlobBaseFee != nil {
+		blockContext.BlobBaseFee = block.BlockOverrides.BlobBaseFee.ToInt()
+	}
+	precompiles := sim.activePrecompiles(sim.base)
+	// State overrides are applied prior to execution of a block
+	if err := block.StateOverrides.Apply(sim.state, precompiles); err != nil {
+
+		return nil, nil, nil, nil, err
+	}
+	var (
+		gasUsed, blobGasUsed uint64
+		txes                 = make([]*types.Transaction, len(block.Calls))
+		callResults          = make([]state.SimCallResultIPSP, len(block.Calls))
+		receipts             = make([]*types.Receipt, len(block.Calls)) // Initialize receipts
+		// tracer   = newTracer(sim.traceTransfers, blockContext.BlockNumber.Uint64(), common.Hash{}, common.Hash{}, 0)
+		tracer   = NewEventTracer(blockContext.BlockNumber.Uint64())
+		vmConfig = &vm.Config{
+			NoBaseFee: !sim.validate,
+			Tracer:    tracer.GetHooks(),
+		}
+		// senders is a map of transaction hashes to their senders.
+		// Transaction objects contain only the signature, and we lose track
+		// of the sender when translating the arguments into a transaction object.
+
+		senders = make(map[common.Hash]common.Address) // Initialize senders
+
+	)
+	tracingStateDB := vm.StateDB(sim.state)
+	if hooks := tracer.GetHooks(); hooks != nil {
+		tracingStateDB = state.NewHookedState(sim.state, hooks)
+	}
+
+	evm := vm.NewEVM(blockContext, tracingStateDB, sim.chainConfig, *vmConfig)
+	// It is possible to override precompiles with EVM bytecode, or
+	// move them to another address.
+	if precompiles != nil {
+		evm.SetPrecompiles(precompiles)
+	}
+	if sim.chainConfig.IsPrague(header.Number, header.Time) || sim.chainConfig.IsVerkle(header.Number, header.Time) {
+		core.ProcessParentBlockHash(header.ParentHash, evm)
+	}
+	if header.ParentBeaconRoot != nil {
+		core.ProcessBeaconBlockRoot(*header.ParentBeaconRoot, evm)
+	}
+	var allLogs []*types.Log
+	for i, call := range block.Calls {
+		if err := ctx.Err(); err != nil {
+
+			return nil, nil, nil, nil, err
+		}
+		if err := sim.sanitizeCall(&call, sim.state, header, blockContext, &gasUsed); err != nil {
+			return nil, nil, nil, nil, err
+
+		}
+		var (
+			tx          = call.ToTransaction(types.DynamicFeeTxType)
+			txHash      = tx.Hash()
+			canonicalID = firewall.CanonicalTxID(tx, sim.chainConfig, header)
+		)
+		txes[i] = tx
+
+		senders[txHash] = call.from() // Populate senders
+
+		tracer.reset(txHash, uint(i))
+		sim.state.SetTxContext(txHash, i)
+		// EoA check is always skipped, even in validation mode.
+		msg := call.ToMessage(header.BaseFee, !sim.validate, true)
+		result, err := applyMessageWithEVM(ctx, evm, msg, timeout, sim.gp)
+
+		if err != nil {
+			txErr := txValidationError(err)
+
+			return nil, nil, nil, nil, txErr
+
+		}
+		// Update the state with pending changes.
+		var root []byte
+		if sim.chainConfig.IsByzantium(blockContext.BlockNumber) {
+			tracingStateDB.Finalise(true)
+		} else {
+			root = sim.state.IntermediateRoot(sim.chainConfig.IsEIP158(blockContext.BlockNumber)).Bytes()
+		}
+		gasUsed += result.UsedGas
+		receipts[i] = core.MakeReceipt(evm, result, sim.state, blockContext.BlockNumber, common.Hash{}, tx, gasUsed, root) // Populate receipts
+		blobGasUsed += receipts[i].BlobGasUsed
+		logs := tracer.Logs()
+		callRes := state.SimCallResultIPSP{ReturnValue: result.Return(), Logs: logs, FTE: tracer.fullTxEvents, GasUsed: hexutil.Uint64(result.UsedGas), CanonicalId: canonicalID}
+		if result.Failed() {
+			callRes.Status = hexutil.Uint64(types.ReceiptStatusFailed)
+			if errors.Is(result.Err, vm.ErrExecutionReverted) {
+				// If the result contains a revert reason, try to unpack it.
+				revertErr := NewRevertError(result.Revert())
+				callRes.Error = &state.CallError{Message: revertErr.Error(), Code: errCodeReverted, Data: revertErr.ErrorData().(string)}
+			} else {
+				callRes.Error = &state.CallError{Message: result.Err.Error(), Code: errCodeVMError}
+			}
+		} else {
+			callRes.Status = hexutil.Uint64(types.ReceiptStatusSuccessful)
+			allLogs = append(allLogs, callRes.Logs...)
+		}
+		callResults[i] = callRes
+	}
+	header.GasUsed = gasUsed
+	if sim.chainConfig.IsCancun(header.Number, header.Time) {
+		header.BlobGasUsed = &blobGasUsed
+	}
+	var requests [][]byte
+	// Process EIP-7685 requests
+	if sim.chainConfig.IsPrague(header.Number, header.Time) {
+		requests = [][]byte{}
+		// EIP-6110
+		if err := core.ParseDepositLogs(&requests, allLogs, sim.chainConfig); err != nil {
+
+			return nil, nil, nil, nil, err
+		}
+		// EIP-7002
+		if err := core.ProcessWithdrawalQueue(&requests, evm); err != nil {
+			return nil, nil, nil, nil, err
+		}
+		// EIP-7251
+		if err := core.ProcessConsolidationQueue(&requests, evm); err != nil {
+			return nil, nil, nil, nil, err
+
+		}
+	}
+	if requests != nil {
+		reqHash := types.CalcRequestsHash(requests)
+		header.RequestsHash = &reqHash
+	}
+	blockBody := &types.Body{Transactions: txes, Withdrawals: *block.BlockOverrides.Withdrawals}
+	chainHeadReader := &simChainHeadReader{ctx, sim.b}
+	b, err := sim.b.Engine().FinalizeAndAssemble(chainHeadReader, header, sim.state, blockBody, receipts)
+	if err != nil {
+
+		return nil, nil, nil, nil, err
+	}
+	repairLogsIPSP(callResults, b.Hash())
+	return b, callResults, receipts, senders, nil
+
+}
+
 // repairLogs updates the block hash in the logs present in the result of
 // a simulated block. This is needed as during execution when logs are collected
 // the block hash is not known.
 func repairLogs(calls []state.SimCallResult, hash common.Hash) {
+	for i := range calls {
+		for j := range calls[i].Logs {
+			calls[i].Logs[j].BlockHash = hash
+		}
+	}
+}
+
+// repairLogs updates the block hash in the logs present in the result of
+// a simulated block. This is needed as during execution when logs are collected
+// the block hash is not known.
+func repairLogsIPSP(calls []state.SimCallResultIPSP, hash common.Hash) {
 	for i := range calls {
 		for j := range calls[i].Logs {
 			calls[i].Logs[j].BlockHash = hash

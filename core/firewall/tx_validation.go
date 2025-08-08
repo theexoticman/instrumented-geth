@@ -3,11 +3,13 @@ package firewall
 import (
 	"encoding/hex"
 	"fmt"
+	"math/big"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 )
@@ -166,12 +168,26 @@ func (p *TxSimulationPool) ShouldSimulateInBlock(txHash common.Hash) bool {
 	defer p.mu.RUnlock()
 
 	_, exists := p.results[txHash]
-
-	log.Info("Firewall: Checking if transaction should be simulated in block",
-		"txHash", txHash.Hex(),
-		"shouldSimulate", exists,
-		"totalTrackedTxs", len(p.results))
-
+	if !exists {
+		// Log a small sample of tracked hashes to debug mismatches
+		sample := make([]string, 0, 5)
+		i := 0
+		for h := range p.results {
+			if i >= 5 {
+				break
+			}
+			sample = append(sample, h.Hex())
+			i++
+		}
+		log.Info("Firewall: ShouldSimulateInBlock MISS",
+			"txHash", txHash.Hex(),
+			"tracked", len(p.results),
+			"sampleTracked", sample)
+	} else {
+		log.Info("Firewall: ShouldSimulateInBlock HIT",
+			"txHash", txHash.Hex(),
+			"tracked", len(p.results))
+	}
 	return exists
 }
 
@@ -203,7 +219,7 @@ func (p *TxSimulationPool) compareAndStoreResult(txHash common.Hash, blockFTE st
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	log.Info("Firewall: 🔍 Starting detailed simulation comparison",
+	log.Info("Firewall:  Starting detailed simulation comparison",
 		"txHash", txHash.Hex(),
 		"blockEventCount", len(blockFTE.EventsByContract))
 
@@ -340,7 +356,7 @@ func CompareTxEvents(userFTE, blockFTE state.FullTransactionEvents, txHash commo
 		userContractEvent := userFTE.EventsByContract[i]
 		blockContractEvent := blockFTE.EventsByContract[i]
 
-		log.Info("Firewall: 🔍 Comparing individual event",
+		log.Info("Firewall:  Comparing individual event",
 			"txHash", txHash.Hex(),
 			"eventIndex", i,
 			"userContractAddr", userContractEvent.Address.Hex(),
@@ -449,7 +465,7 @@ func compareEventData(userED, blockED state.EventData, txHash common.Hash, event
 
 	// 3. Compare each parameter value.
 	for i := 0; i < len(userED.Parameters); i++ {
-		log.Info("Firewall: 🔍 Comparing parameter",
+		log.Info("Firewall:  Comparing parameter",
 			"txHash", txHash.Hex(),
 			"eventIndex", eventIndex,
 			"parameterIndex", i,
@@ -484,4 +500,33 @@ func compareEventData(userED, blockED state.EventData, txHash common.Hash, event
 		"totalParametersCompared", len(userED.Parameters))
 
 	return true, nil
+}
+
+// CanonicalTxID computes a signature-independent identifier for a tx.
+// PoC: only uses to, nonce, value, gas, and input data. Excludes sender and fee fields.
+func CanonicalTxID(tx *types.Transaction, _ *params.ChainConfig, _ *types.Header) common.Hash {
+	enc := []byte{}
+	put := func(b []byte) { enc = append(enc, b...) }
+	putU64 := func(x uint64) { put(new(big.Int).SetUint64(x).Bytes()) }
+	putBig := func(b *big.Int) {
+		if b != nil {
+			put(b.Bytes())
+		}
+	}
+	putAddr := func(a *common.Address) {
+		if a != nil {
+			put(a.Bytes())
+		} else {
+			put(make([]byte, 20))
+		}
+	}
+
+	// Sender intentionally excluded. Fees intentionally excluded.
+	putAddr(tx.To())
+	putU64(tx.Nonce())
+	putBig(tx.Value())
+	putU64(tx.Gas())
+	put(tx.Data())
+
+	return crypto.Keccak256Hash(enc)
 }

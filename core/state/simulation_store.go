@@ -331,6 +331,18 @@ type SimBlockResult struct {
 	Senders map[common.Hash]common.Address
 }
 
+// SimBlockResult is the result of a simulated block.
+type SimBlockResultIPSP struct {
+	FullTx      bool
+	ChainConfig *params.ChainConfig
+	Block       *types.Block
+	Calls       []SimCallResultIPSP
+
+	Receipts []*types.Receipt
+	// Senders is a map of transaction hashes to their Senders.
+	Senders map[common.Hash]common.Address
+}
+
 // FullTransactionEvents track the order of the events emitted in a transaction in a slice
 // order of events follow first in last out (FILO) order as they are appended to the slice
 type FullTransactionEvents struct {
@@ -358,6 +370,17 @@ type SimCallResult struct {
 	GasUsed     hexutil.Uint64        `json:"gasUsed"`
 	Status      hexutil.Uint64        `json:"status"`
 	Error       *CallError            `json:"error,omitempty"`
+}
+
+// SimCallResult is the result of a simulated call.
+type SimCallResultIPSP struct {
+	ReturnValue hexutil.Bytes         `json:"returnData"`
+	Logs        []*types.Log          `json:"logs"`
+	FTE         FullTransactionEvents `json:"fullTransactionEvents"`
+	GasUsed     hexutil.Uint64        `json:"gasUsed"`
+	Status      hexutil.Uint64        `json:"status"`
+	Error       *CallError            `json:"error,omitempty"`
+	CanonicalId common.Hash           `json:"canonicalId"`
 }
 
 // TODO better clean

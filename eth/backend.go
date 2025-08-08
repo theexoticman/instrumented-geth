@@ -794,6 +794,12 @@ func (s *Ethereum) AddToPrivatePool(tx *types.Transaction) error {
 	if s.privateTxPool == nil {
 		return fmt.Errorf("private transaction pool not initialized")
 	}
+	// Idempotent: if already present, treat as success to prevent client retries
+	if s.privateTxPool.GetTransaction(tx.Hash()) != nil {
+		log.Debug("Private pool: duplicate tx, returning success",
+			"hash", tx.Hash().Hex(), "nonce", tx.Nonce())
+		return nil
+	}
 	log.Info("Pre-private-pool", "hash", tx.Hash().Hex(), "nonce", tx.Nonce(), "chainId", tx.ChainId())
 	return s.privateTxPool.AddTransaction(tx)
 }

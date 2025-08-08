@@ -839,7 +839,7 @@ func (api *BlockChainAPI) SimulateV1(ctx context.Context, opts simOpts, blockNrO
 // TODO, split behavior if tx is of type 4
 // SimulateV1IPSP is a variant of SimulateV1 that returns the final state.
 // used in solo mining in combination with the simulation store
-func (api *BlockChainAPI) SimulateV1IPSP(ctx context.Context, opts simOpts, blockNrOrHash *rpc.BlockNumberOrHash) ([]*state.SimBlockResult, error) {
+func (api *BlockChainAPI) SimulateV1IPSP(ctx context.Context, opts simOpts, blockNrOrHash *rpc.BlockNumberOrHash) ([]*state.SimBlockResultIPSP, error) {
 	if simB, ok := api.b.(interface {
 		IsIntentGuardModeEnabled() bool
 	}); ok && simB.IsIntentGuardModeEnabled() {
@@ -873,7 +873,7 @@ func (api *BlockChainAPI) SimulateV1IPSP(ctx context.Context, opts simOpts, bloc
 			fullTx:         opts.ReturnFullTransactions,
 		}
 
-		results, err := sim.execute(ctx, opts.BlockStateCalls)
+		results, err := sim.executeIPSP(ctx, opts.BlockStateCalls)
 		if err != nil {
 			return nil, err
 		}
@@ -881,13 +881,13 @@ func (api *BlockChainAPI) SimulateV1IPSP(ctx context.Context, opts simOpts, bloc
 		for _, res := range results {
 			// add all the simulation results
 			for index := 0; index < len(res.Calls); index++ {
-				api.b.TxSimulationPool().AddUserSimulation(res.Receipts[index].TxHash, res.Calls[index].FTE)
+				api.b.TxSimulationPool().AddUserSimulation(res.Calls[index].CanonicalId, res.Calls[index].FTE)
 			}
 		}
 		// StoreSimulatedArtifacts(simB.SimChainStore(), results, sim.state, originalTx) // Pass nil for originalTx here
 		return results, nil
 	}
-	return []*state.SimBlockResult{}, nil
+	return []*state.SimBlockResultIPSP{}, nil
 }
 
 // TODO, split behavior if tx is of type 4
