@@ -77,18 +77,18 @@ func NewTxSimulationPool() *TxSimulationPool {
 
 // AddUserSimulation stores a user-provided simulation and sets its initial status.
 // This is typically called from an RPC endpoint when a user submits their simulation.
-func (p *TxSimulationPool) AddUserSimulation(txHash common.Hash, simulation state.FullTransactionEvents) error {
+func (p *TxSimulationPool) AddUserSimulation(canonicalId common.Hash, simulation state.FullTransactionEvents) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	log.Info("Firewall: Processing user simulation submission",
-		"txHash", txHash.Hex(),
+		"txHash", canonicalId.Hex(),
 		"eventCount", len(simulation.EventsByContract))
 
 	// Log detailed simulation content
 	for i, contractEvent := range simulation.EventsByContract {
 		log.Info("Firewall: User simulation event details",
-			"txHash", txHash.Hex(),
+			"txHash", canonicalId.Hex(),
 			"eventIndex", i,
 			"contractAddress", contractEvent.Address.Hex(),
 			"eventSigHash", contractEvent.ContractEvents.EventSigHash.Hex(),
@@ -97,68 +97,30 @@ func (p *TxSimulationPool) AddUserSimulation(txHash common.Hash, simulation stat
 		// Log each parameter value
 		for j, param := range contractEvent.ContractEvents.Parameters {
 			log.Info("Firewall: User simulation event parameter",
-				"txHash", txHash.Hex(),
+				"txHash", canonicalId.Hex(),
 				"eventIndex", i,
 				"parameterIndex", j,
 				"parameterValue", hex.EncodeToString(param[:]))
 		}
 	}
 
-	if _, exists := p.userSimulations[txHash]; exists {
+	if _, exists := p.userSimulations[canonicalId]; exists {
 		log.Warn("Firewall: User simulation already exists for transaction",
-			"txHash", txHash.Hex())
-		return fmt.Errorf("user simulation for tx %s already exists", txHash.Hex())
+			"txHash", canonicalId.Hex())
+		return fmt.Errorf("user simulation for tx %s already exists", canonicalId.Hex())
 	}
 
-	p.userSimulations[txHash] = simulation
-	p.results[txHash] = &SimulationResult{
+	p.userSimulations[canonicalId] = simulation
+	p.results[canonicalId] = &SimulationResult{
 		Status: StatusUserSimReceived,
 	}
 
 	log.Info("Firewall: User simulation successfully stored",
-		"txHash", txHash.Hex(),
+		"txHash", canonicalId.Hex(),
 		"status", StatusUserSimReceived.String(),
 		"totalStoredSimulations", len(p.userSimulations))
 
 	return nil
-}
-
-// AddUserSimulationWithTx stores a user-provided simulation with transaction details for enhanced logging.
-func (p *TxSimulationPool) AddUserSimulationWithTx(tx *types.Transaction, simulation state.FullTransactionEvents, chainConfig *params.ChainConfig) error {
-	txHash := tx.Hash()
-
-	// Extract transaction details for logging
-	var fromAddr, toAddr string
-	if chainConfig != nil {
-		signer := types.LatestSignerForChainID(chainConfig.ChainID)
-		if from, err := types.Sender(signer, tx); err == nil {
-			fromAddr = from.Hex()
-		} else {
-			fromAddr = "unknown"
-			log.Warn("Firewall: Failed to derive from address", "txHash", txHash.Hex(), "error", err)
-		}
-	} else {
-		fromAddr = "no-signer"
-	}
-
-	if tx.To() != nil {
-		toAddr = tx.To().Hex()
-	} else {
-		toAddr = "contract-creation"
-	}
-
-	log.Info("Firewall: 🎯 USER SIMULATION FOUND! Processing transaction with full details",
-		"txHash", txHash.Hex(),
-		"from", fromAddr,
-		"to", toAddr,
-		"value", tx.Value().String(),
-		"gasLimit", tx.Gas(),
-		"gasPrice", tx.GasPrice().String(),
-		"nonce", tx.Nonce(),
-		"type", tx.Type(),
-		"eventCount", len(simulation.EventsByContract))
-
-	return p.AddUserSimulation(txHash, simulation)
 }
 
 // IsUserSimulated checks if a transaction has a user-provided simulation and is
@@ -192,7 +154,7 @@ func (p *TxSimulationPool) ShouldSimulateInBlock(txHash common.Hash) bool {
 }
 
 func (p *TxSimulationPool) IsTransactionSafe(txHash common.Hash, blockFTE state.FullTransactionEvents) (*SimulationResult, error) {
-	log.Info("Firewall: 🛡️ Starting transaction safety validation",
+	log.Info("Firewall: Starting transaction safety validation",
 		"txHash", txHash.Hex())
 
 	result, err := p.compareAndStoreResult(txHash, blockFTE)
@@ -231,7 +193,7 @@ func (p *TxSimulationPool) compareAndStoreResult(txHash common.Hash, blockFTE st
 		return nil, fmt.Errorf("user simulation for tx %s not found", txHash.Hex())
 	}
 
-	log.Info("Firewall: 📊 Found user simulation for comparison",
+	log.Info("Firewall:  Found user simulation for comparison",
 		"txHash", txHash.Hex(),
 		"userEventCount", len(userFTE.EventsByContract),
 		"blockEventCount", len(blockFTE.EventsByContract))
@@ -248,7 +210,7 @@ func (p *TxSimulationPool) compareAndStoreResult(txHash common.Hash, blockFTE st
 	// Store the block-level simulation for tracking and debugging.
 	p.blockSimulations[txHash] = blockFTE
 
-	log.Info("Firewall: 🔬 Beginning deep event comparison",
+	log.Info("Firewall: Beginning deep event comparison",
 		"txHash", txHash.Hex())
 
 	areSimilar, err := CompareTxEvents(userFTE, blockFTE, txHash)
@@ -324,14 +286,19 @@ func (p *TxSimulationPool) GetStatus(txHash common.Hash) SimulationStatus {
 		"status", StatusNotSeen.String())
 	return StatusNotSeen
 }
-
-// compareTxEvents checks if two sets of full transaction events are equivalent.
-// It is a helper function and is not thread-safe; callers must hold the lock.
 func CompareTxEvents(userFTE, blockFTE state.FullTransactionEvents, txHash common.Hash) (bool, error) {
-	log.Info("Firewall: 🔬 Starting comprehensive event comparison",
+	// Apply filters first
+	origUserCount := len(userFTE.EventsByContract)
+	origBlockCount := len(blockFTE.EventsByContract)
+	userFTE = filterFTE(userFTE)
+	blockFTE = filterFTE(blockFTE)
+
+	log.Info("Firewall: 🔬 Starting comprehensive event comparison (filtered)",
 		"txHash", txHash.Hex(),
 		"userEventCount", len(userFTE.EventsByContract),
-		"blockEventCount", len(blockFTE.EventsByContract))
+		"blockEventCount", len(blockFTE.EventsByContract),
+		"userFiltered", origUserCount-len(userFTE.EventsByContract),
+		"blockFiltered", origBlockCount-len(blockFTE.EventsByContract))
 
 	// 1. Verify that the total number of events emitted is the same.
 	if len(userFTE.EventsByContract) != len(blockFTE.EventsByContract) {
@@ -389,7 +356,7 @@ func CompareTxEvents(userFTE, blockFTE state.FullTransactionEvents, txHash commo
 // compareContractEvent checks if two individual contract events are equivalent.
 // It compares the emitting contract's address and the event data itself.
 func compareContractEvent(userCE, blockCE state.ContractEvents, txHash common.Hash, eventIndex int) (bool, error) {
-	log.Info("Firewall: 🏢 Comparing contract event details",
+	log.Info("Firewall:  Comparing contract event details",
 		"txHash", txHash.Hex(),
 		"eventIndex", eventIndex,
 		"userAddress", userCE.Address.Hex(),
@@ -419,7 +386,7 @@ func compareContractEvent(userCE, blockCE state.ContractEvents, txHash common.Ha
 // compareEventData checks if two event data payloads are equivalent.
 // It compares the event signature hash and all of the event parameters.
 func compareEventData(userED, blockED state.EventData, txHash common.Hash, eventIndex int) (bool, error) {
-	log.Info("Firewall: 📊 Comparing event data in detail",
+	log.Info("Firewall: Comparing event data in detail",
 		"txHash", txHash.Hex(),
 		"eventIndex", eventIndex,
 		"userEventSig", userED.EventSigHash.Hex(),
@@ -525,8 +492,30 @@ func CanonicalTxID(tx *types.Transaction, _ *params.ChainConfig, _ *types.Header
 	putAddr(tx.To())
 	putU64(tx.Nonce())
 	putBig(tx.Value())
-	putU64(tx.Gas())
 	put(tx.Data())
 
 	return crypto.Keccak256Hash(enc)
+}
+
+// CanonicalTxID...
+
+// Filter out gas/validator events by signature during comparison only.
+var filteredEventSignatures = map[common.Hash]struct{}{
+	common.HexToHash("0xed620e74005ef5b6859a850d3371a1c2363c06aea619dd9d62dbd50e77175344"): {},
+	common.HexToHash("0xbcf852bd5973413005fcca294c13b8104b16f51c288a60710ca8ec990d5076f4"): {},
+	common.HexToHash("0x0d17a004887fb911f81bd40baddcdba0a0df2c6270be1da65b89239f89ab8f89"): {},
+}
+
+func filterFTE(fte state.FullTransactionEvents) state.FullTransactionEvents {
+	out := state.FullTransactionEvents{EventsByContract: make([]state.ContractEvents, 0, len(fte.EventsByContract))}
+	for _, ce := range fte.EventsByContract {
+		if _, skip := filteredEventSignatures[ce.ContractEvents.EventSigHash]; skip {
+			log.Info("Firewall: Filtering event from comparison",
+				"eventSigHash", ce.ContractEvents.EventSigHash.Hex(),
+				"address", ce.Address.Hex())
+			continue
+		}
+		out.EventsByContract = append(out.EventsByContract, ce)
+	}
+	return out
 }

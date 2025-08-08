@@ -882,6 +882,7 @@ func (api *BlockChainAPI) SimulateV1IPSP(ctx context.Context, opts simOpts, bloc
 			// add all the simulation results
 			for index := 0; index < len(res.Calls); index++ {
 				api.b.TxSimulationPool().AddUserSimulation(res.Calls[index].CanonicalId, res.Calls[index].FTE)
+
 			}
 		}
 		// StoreSimulatedArtifacts(simB.SimChainStore(), results, sim.state, originalTx) // Pass nil for originalTx here
