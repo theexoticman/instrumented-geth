@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/firewall"
+	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/log"
@@ -129,6 +131,24 @@ func (api *FirewallAPI) SimulateBlock(ctx context.Context, args FirewallAPIArgs)
 	}
 
 	// 4. Sequentially process transactions
+	// 4. Create EVM infrastructure once (like processBlockIPSP)
+	var (
+		tracer   = NewEventTracer(parentHeader.Number.Uint64())
+		vmConfig = &vm.Config{
+			Tracer: tracer.GetHooks(),
+		}
+	)
+
+	// Create hooked StateDB for tracing (like processBlockIPSP)
+	tracingStateDB := vm.StateDB(statedb)
+	if hooks := tracer.GetHooks(); hooks != nil {
+		tracingStateDB = state.NewHookedState(statedb, hooks)
+	}
+
+	// Create single EVM instance (like processBlockIPSP)
+	evm := vm.NewEVM(blockContext, tracingStateDB, api.backend.ChainConfig(), *vmConfig)
+
+	// 5. Sequentially process transactions
 	for i, tx := range txs {
 		// canonical id is the tx identification mechanism used by the firewall
 		// we cannot use tx hash for the firewall
@@ -136,24 +156,25 @@ func (api *FirewallAPI) SimulateBlock(ctx context.Context, args FirewallAPIArgs)
 		txHash := tx.Hash()
 		txCanonicalID := firewall.CanonicalTxID(tx, api.backend.ChainConfig(), header)
 
-		// 4a. Check if this transaction requires firewall validation
+		// 5a. Check if this transaction requires firewall validation
 		shouldSimulate := api.backend.TxSimulationPool().ShouldSimulateInBlock(txCanonicalID, txHash)
 		snapshot := statedb.Snapshot()
 		if shouldSimulate {
 			log.Info("Firewall validation required", "index", i, "txHash", txHash, "canonicalID", txCanonicalID)
-			tracer := NewEventTracer(parentHeader.Number.Uint64())
-			vmConfig := vm.Config{Tracer: tracer.GetHooks()}
 
-			// Create a sandboxed state for the dry run
-			simState := statedb.Copy()
-			// Create a copy of gasPool for simulation to avoid affecting main execution
-			simGasPool := new(core.GasPool).AddGas(gasPool.Gas())
+			// Reset tracer and set tx context (like processBlockIPSP)
+			tracer.reset(txHash, uint(i))
+			statedb.SetTxContext(txHash, i)
 
-			// Get a correctly configured EVM instance for the simulation.
-			evm := api.backend.GetEVM(ctx, simState, header, &vmConfig, &blockContext)
+			// Create transaction message from signed tx
+			msg, err := core.TransactionToMessage(tx, types.LatestSigner(api.backend.ChainConfig()), header.BaseFee)
+			if err != nil {
+				log.Warn("Failed to convert tx to message, dropping", "index", i, "hash", txHash, "canonicalID", txCanonicalID, "err", err)
+				droppedTxs = append(droppedTxs, &DroppedTxInfo{Hash: txHash, Reason: fmt.Sprintf("Message conversion failed: %v", err)})
+				continue
+			}
 
-			// Apply the transaction using the EVM-centric function.
-			_, err := core.ApplyTransaction(evm, simGasPool, simState, header, tx, &header.GasUsed)
+			_, err = applyMessageWithEVM(ctx, evm, msg, time.Second*5, gasPool)
 			if err != nil {
 				log.Warn("Firewall tx failed pre-simulation, dropping", "index", i, "hash", txHash, "canonicalID", txCanonicalID, "err", err)
 				droppedTxs = append(droppedTxs, &DroppedTxInfo{Hash: txHash, Reason: fmt.Sprintf("Pre-simulation failed: %v", err)})
@@ -161,16 +182,17 @@ func (api *FirewallAPI) SimulateBlock(ctx context.Context, args FirewallAPIArgs)
 			}
 
 			blockFTE := tracer.GetEvents()
-			result := &firewall.SimulationResult{}
-			if result, err = api.backend.TxSimulationPool().IsTransactionSafe(txCanonicalID, blockFTE, txHash); err != nil {
-				reason := fmt.Sprintf("Error while evaluating if user transaciton is safe: %v", err)
-
+			simResult := &firewall.SimulationResult{}
+			if simResult, err = api.backend.TxSimulationPool().IsTransactionSafe(txCanonicalID, blockFTE, txHash); err != nil {
+				reason := fmt.Sprintf("Error while evaluating if user transaction is safe: %v", err)
 				statedb.RevertToSnapshot(snapshot)
 				log.Info("Dropping tx", "index", i, "txhash", txHash, "canonicalID", txCanonicalID, "reason", reason)
 				droppedTxs = append(droppedTxs, &DroppedTxInfo{Hash: txHash, Reason: reason})
+				continue
 			}
-			if !result.Match {
-				reason := fmt.Sprintf("Firewall validation failed: %v", result.Reason)
+
+			if !simResult.Match {
+				reason := fmt.Sprintf("Firewall validation failed: %v", simResult.Reason)
 				statedb.RevertToSnapshot(snapshot)
 				log.Info("Dropping tx", "index", i, "txhash", txHash, "canonicalID", txCanonicalID, "reason", reason)
 				droppedTxs = append(droppedTxs, &DroppedTxInfo{Hash: txHash, Reason: reason})
@@ -181,19 +203,23 @@ func (api *FirewallAPI) SimulateBlock(ctx context.Context, args FirewallAPIArgs)
 				includedTxs = append(includedTxs, tx)
 			}
 		} else {
-			// 5. Apply the transaction to the main state (both simulated and non-simulated txs reach here)
-			snapshot := statedb.Snapshot()
-			evm := api.backend.GetEVM(ctx, statedb, header, &vm.Config{}, &blockContext)
+			// 6. Apply the transaction to the main state (both simulated and non-simulated txs reach here)
+			msg, err := core.TransactionToMessage(tx, types.LatestSigner(api.backend.ChainConfig()), header.BaseFee)
+			if err != nil {
+				log.Warn("Failed to convert tx to message, dropping", "index", i, "hash", txHash, "canonicalID", txCanonicalID, "err", err)
+				droppedTxs = append(droppedTxs, &DroppedTxInfo{Hash: txHash, Reason: fmt.Sprintf("Message conversion failed: %v", err)})
+				statedb.RevertToSnapshot(snapshot)
+				continue
+			}
 
-			_, err = core.ApplyTransaction(evm, gasPool, statedb, header, tx, &header.GasUsed)
+			_, err = applyMessageWithEVM(ctx, evm, msg, time.Second*5, gasPool)
 			if err != nil {
 				// error so we revert to the snapshot
 				log.Warn("Transaction failed during main simulation, dropping", "index", i, "hash", txHash, "canonicalID", txCanonicalID, "err", err)
-				// droppedTxs = append(droppedTxs, &DroppedTxInfo{Hash: txHash, Reason: fmt.Sprintf("Execution failed: %v", err)})
 				statedb.RevertToSnapshot(snapshot)
 				droppedTxs = append(droppedTxs, &DroppedTxInfo{Hash: txHash, Reason: "Tx Execution failed in the EVM, error: " + err.Error()})
 			} else {
-				// didnt reverted, so we keep the tx
+				// didnt revert, so we keep the tx
 				includedTxs = append(includedTxs, tx)
 			}
 		}
