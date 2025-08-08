@@ -75,6 +75,12 @@ type FirewallAPIResult struct {
 	DroppedTxs  []*DroppedTxInfo     `json:"droppedTxs"`
 }
 
+// Result type for getQuarantineReason
+type QuarantineReasonResult struct {
+	Found  bool   `json:"found"`
+	Reason string `json:"reason"`
+}
+
 // SimulateBlock simulates a block with a predefined list of transactions, validating
 // any transactions that have a corresponding entry in the Checkpoints map.
 // This function replaces the logic of runIntentGuardProtection, but in a stateless
@@ -185,6 +191,7 @@ func (api *FirewallAPI) SimulateBlock(ctx context.Context, args FirewallAPIArgs)
 			simResult := &firewall.SimulationResult{}
 			if simResult, err = api.backend.TxSimulationPool().IsTransactionSafe(txCanonicalID, blockFTE, txHash); err != nil {
 				reason := fmt.Sprintf("Error while evaluating if user transaction is safe: %v", err)
+				api.backend.TxSimulationPool().StoreQuarantine(txCanonicalID, reason)
 				statedb.RevertToSnapshot(snapshot)
 				log.Info("Dropping tx", "index", i, "txhash", txHash, "canonicalID", txCanonicalID, "reason", reason)
 				droppedTxs = append(droppedTxs, &DroppedTxInfo{Hash: txHash, Reason: reason})
@@ -193,6 +200,7 @@ func (api *FirewallAPI) SimulateBlock(ctx context.Context, args FirewallAPIArgs)
 
 			if !simResult.Match {
 				reason := fmt.Sprintf("Firewall validation failed: %v", simResult.Reason)
+				api.backend.TxSimulationPool().StoreQuarantine(txCanonicalID, reason)
 				statedb.RevertToSnapshot(snapshot)
 				log.Info("Dropping tx", "index", i, "txhash", txHash, "canonicalID", txCanonicalID, "reason", reason)
 				droppedTxs = append(droppedTxs, &DroppedTxInfo{Hash: txHash, Reason: reason})
@@ -230,4 +238,15 @@ func (api *FirewallAPI) SimulateBlock(ctx context.Context, args FirewallAPIArgs)
 		IncludedTxs: includedTxs,
 		DroppedTxs:  droppedTxs,
 	}, nil
+}
+
+// getQuarantineReason RPC: firewall_getQuarantineReason
+// For PoC, we switch to canonicalID to identify quarantines.
+// Note: we keep the method name for wire-compatibility but the parameter is canonicalID.
+func (api *FirewallAPI) GetQuarantineReason(ctx context.Context, canonicalID common.Hash) (*QuarantineReasonResult, error) {
+	reason, ok := api.backend.TxSimulationPool().GetQuarantineReason(canonicalID)
+	if !ok {
+		return &QuarantineReasonResult{Found: false, Reason: ""}, nil
+	}
+	return &QuarantineReasonResult{Found: true, Reason: reason}, nil
 }

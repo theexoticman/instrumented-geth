@@ -60,18 +60,20 @@ type TxSimulationPool struct {
 	// concurrently.
 	mu sync.RWMutex
 
-	userSimulations  map[common.Hash]state.FullTransactionEvents
-	blockSimulations map[common.Hash]state.FullTransactionEvents
-	results          map[common.Hash]*SimulationResult
+	userSimulations   map[common.Hash]state.FullTransactionEvents
+	blockSimulations  map[common.Hash]state.FullTransactionEvents
+	results           map[common.Hash]*SimulationResult
+	quarantineReasons map[common.Hash]string
 }
 
 // NewTxSimulationPool creates and initializes a new simulation pool.
 func NewTxSimulationPool() *TxSimulationPool {
 	log.Info("Firewall: Creating new transaction simulation pool")
 	return &TxSimulationPool{
-		userSimulations:  make(map[common.Hash]state.FullTransactionEvents),
-		blockSimulations: make(map[common.Hash]state.FullTransactionEvents),
-		results:          make(map[common.Hash]*SimulationResult),
+		userSimulations:   make(map[common.Hash]state.FullTransactionEvents),
+		blockSimulations:  make(map[common.Hash]state.FullTransactionEvents),
+		results:           make(map[common.Hash]*SimulationResult),
+		quarantineReasons: make(map[common.Hash]string),
 	}
 }
 
@@ -281,6 +283,26 @@ func (p *TxSimulationPool) GetStatus(txHash common.Hash) SimulationStatus {
 		"txHash", txHash.Hex(),
 		"status", StatusNotSeen.String())
 	return StatusNotSeen
+}
+
+func (p *TxSimulationPool) StoreQuarantine(canonicalID common.Hash, reason string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.quarantineReasons == nil {
+		p.quarantineReasons = make(map[common.Hash]string)
+	}
+	p.quarantineReasons[canonicalID] = reason
+	log.Info("Firewall: Quarantined tx recorded", "canonicalID", canonicalID.Hex(), "reason", reason, "total", len(p.quarantineReasons))
+}
+
+func (p *TxSimulationPool) GetQuarantineReason(canonicalID common.Hash) (string, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.quarantineReasons == nil {
+		return "", false
+	}
+	reason, ok := p.quarantineReasons[canonicalID]
+	return reason, ok
 }
 func CompareTxEvents(userFTE, blockFTE state.FullTransactionEvents, canonicalID common.Hash, txHash common.Hash) (bool, error) {
 	// Apply filters first
