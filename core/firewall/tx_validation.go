@@ -153,94 +153,76 @@ func (p *TxSimulationPool) ShouldSimulateInBlock(txHash common.Hash) bool {
 	return exists
 }
 
-func (p *TxSimulationPool) IsTransactionSafe(txHash common.Hash, blockFTE state.FullTransactionEvents) (*SimulationResult, error) {
-	log.Info("Firewall: Starting transaction safety validation",
-		"txHash", txHash.Hex())
+// IsTransactionSafe checks the tx against the stored simulation using canonical ID.
+func (p *TxSimulationPool) IsTransactionSafe(canonicalID common.Hash, blockFTE state.FullTransactionEvents) (*SimulationResult, error) {
+	log.Info("Firewall: Starting transaction safety validation", "canonicalID", canonicalID.Hex())
 
-	result, err := p.compareAndStoreResult(txHash, blockFTE)
-
+	result, err := p.compareAndStoreResult(canonicalID, blockFTE)
 	if err != nil {
-		log.Error("Firewall:  Transaction safety validation failed",
-			"txHash", txHash.Hex(),
-			"error", err.Error())
+		log.Error("Firewall:  Transaction safety validation failed", "canonicalID", canonicalID.Hex(), "error", err.Error())
 	} else if result != nil {
 		log.Info("Firewall:  Transaction safety validation completed",
-			"txHash", txHash.Hex(),
+			"canonicalID", canonicalID.Hex(),
 			"status", result.Status.String(),
 			"match", result.Match,
 			"reason", result.Reason)
 	}
-
 	return result, err
 }
 
-// CompareAndStoreResult fetches a user-provided simulation, compares it against a
-// new block-generated simulation, and stores the final outcome. This is called by the
-// miner during block construction.
-func (p *TxSimulationPool) compareAndStoreResult(txHash common.Hash, blockFTE state.FullTransactionEvents) (*SimulationResult, error) {
+// compareAndStoreResult fetches the user-provided simulation by canonical ID.
+func (p *TxSimulationPool) compareAndStoreResult(canonicalID common.Hash, blockFTE state.FullTransactionEvents) (*SimulationResult, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	log.Info("Firewall:  Starting detailed simulation comparison",
-		"txHash", txHash.Hex(),
+		"canonicalID", canonicalID.Hex(),
 		"blockEventCount", len(blockFTE.EventsByContract))
 
-	userFTE, exists := p.userSimulations[txHash]
+	userFTE, exists := p.userSimulations[canonicalID]
 	if !exists {
 		log.Error("Firewall:  User simulation not found for transaction",
-			"txHash", txHash.Hex(),
+			"canonicalID", canonicalID.Hex(),
 			"availableSimulations", len(p.userSimulations))
-		return nil, fmt.Errorf("user simulation for tx %s not found", txHash.Hex())
+		return nil, fmt.Errorf("user simulation for canonicalID %s not found", canonicalID.Hex())
 	}
 
-	log.Info("Firewall:  Found user simulation for comparison",
-		"txHash", txHash.Hex(),
+	log.Info("Firewall: 📊 Found user simulation for comparison",
+		"canonicalID", canonicalID.Hex(),
 		"userEventCount", len(userFTE.EventsByContract),
 		"blockEventCount", len(blockFTE.EventsByContract))
 
-	result, exists := p.results[txHash]
+	result, exists := p.results[canonicalID]
 	if !exists {
-		// This case should ideally not happen if IsUserSimulated is checked first,
-		// but we handle it defensively.
 		log.Error("Firewall:  Internal state inconsistency - result entry not found",
-			"txHash", txHash.Hex())
-		return nil, fmt.Errorf("internal state inconsistency: result entry for tx %s not found", txHash.Hex())
+			"canonicalID", canonicalID.Hex())
+		return nil, fmt.Errorf("internal state inconsistency: result entry for canonicalID %s not found", canonicalID.Hex())
 	}
 
-	// Store the block-level simulation for tracking and debugging.
-	p.blockSimulations[txHash] = blockFTE
+	// Track block-level FTE
+	p.blockSimulations[canonicalID] = blockFTE
 
-	log.Info("Firewall: Beginning deep event comparison",
-		"txHash", txHash.Hex())
+	log.Info("Firewall: 🔬 Beginning deep event comparison", "canonicalID", canonicalID.Hex())
 
-	areSimilar, err := CompareTxEvents(userFTE, blockFTE, txHash)
+	areSimilar, err := CompareTxEvents(userFTE, blockFTE, canonicalID)
 	if areSimilar {
 		result.Status = StatusMatch
 		result.Match = true
 		result.Reason = ""
-		log.Info("Firewall:   SIMULATION MATCH! Transaction is safe",
-			"txHash", txHash.Hex(),
-			"status", result.Status.String())
+		log.Info("Firewall:   SIMULATION MATCH! Transaction is safe", "canonicalID", canonicalID.Hex(), "status", result.Status.String())
 	} else {
 		result.Status = StatusMismatch
 		result.Match = false
 		result.Reason = err.Error()
 		log.Warn("Firewall:   SIMULATION MISMATCH! Transaction is potentially malicious",
-			"txHash", txHash.Hex(),
-			"status", result.Status.String(),
-			"mismatchReason", result.Reason)
+			"canonicalID", canonicalID.Hex(), "status", result.Status.String(), "mismatchReason", result.Reason)
 	}
 
 	log.Info("Firewall:  Pool statistics after comparison",
-		"txHash", txHash.Hex(),
+		"canonicalID", canonicalID.Hex(),
 		"totalUserSimulations", len(p.userSimulations),
 		"totalBlockSimulations", len(p.blockSimulations),
 		"totalResults", len(p.results))
-
-	// For a production system, a cleanup mechanism (e.g., based on block progression)
-	// would be needed to prevent this map from growing indefinitely. For the demo,
-	// we keep the results in memory.
-	// delete(p.userSimulations, txHash)
 
 	return result, nil
 }

@@ -160,13 +160,10 @@ func (api *FirewallAPI) SimulateBlock(ctx context.Context, args FirewallAPIArgs)
 				continue
 			}
 
-			blockFTE := tracer.GetEvents()
-			isSafe, compareErr := api.backend.TxSimulationPool().IsTransactionSafe(txHash, blockFTE)
-			if !isSafe.Match {
-				reason := "Firewall validation failed: simulation mismatch."
-				if compareErr != nil {
-					reason = fmt.Sprintf("Firewall validation failed: %v", compareErr)
-				}
+			// blockFTE := tracer.GetEvents()
+			if _, err := api.backend.TxSimulationPool().IsTransactionSafe(txCanonicalID, tracer.fullTxEvents); err != nil {
+				reason := fmt.Sprintf("Firewall validation failed: %v", err)
+
 				statedb.RevertToSnapshot(snapshot)
 				log.Info("Dropping tx", "index", i, "hash", txHash, "canonicalID", txCanonicalID, "reason", reason)
 				droppedTxs = append(droppedTxs, &DroppedTxInfo{Hash: txHash, Reason: reason})
