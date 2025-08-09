@@ -60,20 +60,27 @@ type TxSimulationPool struct {
 	// concurrently.
 	mu sync.RWMutex
 
-	userSimulations   map[common.Hash]state.FullTransactionEvents
-	blockSimulations  map[common.Hash]state.FullTransactionEvents
-	results           map[common.Hash]*SimulationResult
-	quarantineReasons map[common.Hash]string
+	userSimulations              map[common.Hash]state.FullTransactionEvents
+	blockSimulations             map[common.Hash]state.FullTransactionEvents
+	results                      map[common.Hash]*SimulationResult
+	IntentGuardInterceptsReasons map[common.Hash]IntentGuardIntercept
+	IntentGuardIntercepts        []common.Hash
+}
+
+type IntentGuardIntercept struct {
+	Reason   string
+	BlockNum uint64
 }
 
 // NewTxSimulationPool creates and initializes a new simulation pool.
 func NewTxSimulationPool() *TxSimulationPool {
 	log.Info("Firewall: Creating new transaction simulation pool")
 	return &TxSimulationPool{
-		userSimulations:   make(map[common.Hash]state.FullTransactionEvents),
-		blockSimulations:  make(map[common.Hash]state.FullTransactionEvents),
-		results:           make(map[common.Hash]*SimulationResult),
-		quarantineReasons: make(map[common.Hash]string),
+		userSimulations:              make(map[common.Hash]state.FullTransactionEvents),
+		blockSimulations:             make(map[common.Hash]state.FullTransactionEvents),
+		results:                      make(map[common.Hash]*SimulationResult),
+		IntentGuardInterceptsReasons: make(map[common.Hash]IntentGuardIntercept),
+		IntentGuardIntercepts:        make([]common.Hash, 0),
 	}
 }
 
@@ -285,24 +292,40 @@ func (p *TxSimulationPool) GetStatus(txHash common.Hash) SimulationStatus {
 	return StatusNotSeen
 }
 
-func (p *TxSimulationPool) StoreQuarantine(canonicalID common.Hash, reason string) {
+func (p *TxSimulationPool) StoreIntentGuardIntercept(canonicalID common.Hash, blockNum uint64, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.quarantineReasons == nil {
-		p.quarantineReasons = make(map[common.Hash]string)
+
+	safetyIntercept := IntentGuardIntercept{
+		Reason:   reason,
+		BlockNum: blockNum,
 	}
-	p.quarantineReasons[canonicalID] = reason
-	log.Info("Firewall: Quarantined tx recorded", "canonicalID", canonicalID.Hex(), "reason", reason, "total", len(p.quarantineReasons))
+	p.IntentGuardInterceptsReasons[canonicalID] = safetyIntercept
+	p.IntentGuardIntercepts = append(p.IntentGuardIntercepts, canonicalID)
+	log.Info("Firewall: IntentGuardIntercept tx recorded", "canonicalID", canonicalID.Hex(), "reason", reason, "total", len(p.IntentGuardInterceptsReasons))
 }
 
-func (p *TxSimulationPool) GetQuarantineReason(canonicalID common.Hash) (string, bool) {
+func (p *TxSimulationPool) GetIntentGuardIntercept(canonicalID common.Hash) (IntentGuardIntercept, bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	if p.quarantineReasons == nil {
-		return "", false
+	if p.IntentGuardInterceptsReasons == nil {
+		safetyIntercept := IntentGuardIntercept{
+			Reason:   "",
+			BlockNum: 0,
+		}
+		return safetyIntercept, false
 	}
-	reason, ok := p.quarantineReasons[canonicalID]
-	return reason, ok
+	reason, ok := p.IntentGuardInterceptsReasons[canonicalID]
+	safetyIntercept := IntentGuardIntercept{
+		Reason:   reason.Reason,
+		BlockNum: reason.BlockNum,
+	}
+	return safetyIntercept, ok
+}
+
+func (p *TxSimulationPool) GetAllIntentGuardInterceptIDs() []common.Hash {
+	return p.IntentGuardIntercepts
+
 }
 func CompareTxEvents(userFTE, blockFTE state.FullTransactionEvents, canonicalID common.Hash, txHash common.Hash) (bool, error) {
 	// Apply filters first

@@ -892,11 +892,20 @@ func (ec *Client) RemoveTransaction(ctx context.Context, txHash common.Hash) (bo
 	return result, nil
 }
 
-// GetQuarantineReason queries firewall_getQuarantineReason using the canonical tx id.
-func (ec *Client) GetQuarantineReason(ctx context.Context, canonicalID common.Hash) (*ethapi.QuarantineReasonResult, error) {
-	var result ethapi.QuarantineReasonResult
-	if err := ec.c.CallContext(ctx, &result, "firewall_getQuarantineReason", canonicalID); err != nil {
+// GetIntentGuardIntercept queries firewall_getIntentGuardIntercept using the canonical tx id.
+func (ec *Client) GetIntentGuardIntercept(ctx context.Context, canonicalID common.Hash) (*ethapi.IntentGuardInterceptResult, error) {
+	var result ethapi.IntentGuardInterceptResult
+	if err := ec.c.CallContext(ctx, &result, "firewall_getIntentGuardIntercept", canonicalID); err != nil {
 		return nil, err
 	}
 	return &result, nil
+}
+
+// GetIntentGuardIntercept queries firewall_getAllIntentGuardIntercept using the canonical tx id.
+func (ec *Client) GetAllIntentGuardInterceptIDs(ctx context.Context) ([]*ethapi.IntentGuardInterceptResult, error) {
+	var result []*ethapi.IntentGuardInterceptResult
+	if err := ec.c.CallContext(ctx, &result, "firewall_getAllIntentGuardInterceptIDs"); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
